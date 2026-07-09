@@ -1,0 +1,102 @@
+# CreditFlow — full stack. Phase 0 brings up shared infrastructure.
+# Application services are added to this file as each phase is built (a
+# commented example service block is shown at the bottom).
+#
+#   docker compose up -d           # infra
+#   docker compose logs -f rabbitmq
+
+services:
+  # ---- PostgreSQL: one instance, schema-per-service ----
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-creditflow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-creditflow}
+      POSTGRES_DB: ${POSTGRES_DB:-creditflow}
+    ports: ["5432:5432"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks: [creditflow]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-creditflow}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ---- Redis: cache, JWT jti store, rate-limit counters, SSE pub/sub, Celery broker ----
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports: ["6379:6379"]
+    volumes:
+      - redisdata:/data
+    networks: [creditflow]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ---- RabbitMQ: topic exchanges per domain, durable queues, DLQ ----
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-creditflow}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASS:-creditflow}
+    ports:
+      - "5672:5672"     # AMQP
+      - "15672:15672"   # management UI (http://localhost:15672)
+    volumes:
+      - rabbitdata:/var/lib/rabbitmq
+    networks: [creditflow]
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ---- MongoDB: scraper documents only ----
+  mongo:
+    image: mongo:7
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_USER:-creditflow}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASS:-creditflow}
+    ports: ["27017:27017"]
+    volumes:
+      - mongodata:/data/db
+    networks: [creditflow]
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # =========================================================================
+  # Application services are added here as each phase is built. Template:
+  #
+  #   auth:
+  #     build: ./services/auth
+  #     env_file: .env
+  #     environment:
+  #       DATABASE_URL: postgresql+psycopg://creditflow:creditflow@postgres:5432/creditflow
+  #       REDIS_URL: redis://redis:6379/0
+  #       RABBITMQ_URL: amqp://creditflow:creditflow@rabbitmq:5672/
+  #       JWT_PUBLIC_KEY_PATH: /keys/jwt_public.pem
+  #       JWT_PRIVATE_KEY_PATH: /keys/jwt_private.pem   # auth only
+  #     volumes:
+  #       - ./keys:/keys:ro
+  #     depends_on:
+  #       postgres: { condition: service_healthy }
+  #       rabbitmq: { condition: service_healthy }
+  #     networks: [creditflow]
+  # =========================================================================
+
+networks:
+  creditflow:
+    driver: bridge
+
+volumes:
+  pgdata:
+  redisdata:
+  rabbitdata:
+  mongodata:

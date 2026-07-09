@@ -1,0 +1,6 @@
+# Service-specific deps only. The shared `creditflow_common` package (and its
+# deps: pyjwt, pika, sqlalchemy, psycopg, redis) is installed from /libs in the
+# Dockerfile.
+fastapi==0.111.0
+uvicorn[standard]==0.29.0
+python-dotenv==1.0.1

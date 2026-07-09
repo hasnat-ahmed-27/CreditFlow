@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+.pytest_cache/
+.mypy_cache/
+
+# Env / secrets
+.env
+*.env
+!.env.example
+
+# RS256 private key — NEVER commit. Public key is committed.
+keys/jwt_private.pem
+
+# Node / frontend
+node_modules/
+dist/
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+*.swp

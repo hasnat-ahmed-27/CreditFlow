@@ -1,0 +1,41 @@
+name: backend-ci
+
+# Runs pytest for every backend service that has tests. Required to pass before
+# a PR can merge (enforce via branch protection on dev/main). Grows automatically
+# as services are added — no need to edit this file per service.
+on:
+  pull_request:
+    paths: ["services/**", "libs/**", ".github/workflows/backend-ci.yml"]
+  push:
+    branches: [dev, main]
+    paths: ["services/**", "libs/**"]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install shared library + test tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install ./libs
+          pip install pytest httpx
+
+      - name: Test each service that has tests
+        run: |
+          set -e
+          failed=0
+          for d in services/*/ ; do
+            if compgen -G "${d}test_*.py" > /dev/null || compgen -G "${d}tests/*.py" > /dev/null; then
+              echo "::group::pytest ${d}"
+              pip install -r "${d}requirements.txt" || true
+              ( cd "$d" && PYTHONPATH=. pytest -q ) || failed=1
+              echo "::endgroup::"
+            fi
+          done
+          exit $failed
