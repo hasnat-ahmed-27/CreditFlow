@@ -1,23 +1,41 @@
 """
 Test bootstrap. Must run BEFORE any app import: creditflow_common.config reads
 the environment at import time, so we point it at throwaway/test resources
-here — SQLite instead of Postgres, the repo's real RS256 keypair, fakeredis
-instead of Redis, and a stub publisher instead of RabbitMQ. This is why the
-suite runs in CI with no infra containers.
+here — SQLite instead of Postgres, an EPHEMERAL RS256 keypair (the real
+private key is gitignored, so CI never has it), fakeredis instead of Redis,
+and a stub publisher instead of RabbitMQ. This is why the suite runs in CI
+with no infra containers and no secrets.
 """
 from __future__ import annotations
 
 import os
-import pathlib
 import tempfile
 import uuid
 
-REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
-_DB_FILE = os.path.join(tempfile.gettempdir(), f"creditflow_auth_test_{uuid.uuid4().hex}.db")
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+
+_TMP = tempfile.mkdtemp(prefix="creditflow_auth_test_")
+_DB_FILE = os.path.join(_TMP, f"auth_{uuid.uuid4().hex}.db")
+_PRIV_PEM = os.path.join(_TMP, "jwt_private.pem")
+_PUB_PEM = os.path.join(_TMP, "jwt_public.pem")
+
+_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+with open(_PRIV_PEM, "wb") as f:
+    f.write(_key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    ))
+with open(_PUB_PEM, "wb") as f:
+    f.write(_key.public_key().public_bytes(
+        serialization.Encoding.PEM,
+        serialization.PublicFormat.SubjectPublicKeyInfo,
+    ))
 
 os.environ["DATABASE_URL"] = f"sqlite:///{_DB_FILE}"
-os.environ["JWT_PRIVATE_KEY_PATH"] = str(REPO_ROOT / "keys" / "jwt_private.pem")
-os.environ["JWT_PUBLIC_KEY_PATH"] = str(REPO_ROOT / "keys" / "jwt_public.pem")
+os.environ["JWT_PRIVATE_KEY_PATH"] = _PRIV_PEM
+os.environ["JWT_PUBLIC_KEY_PATH"] = _PUB_PEM
 os.environ["AUTH_EXPOSE_DEV_TOKENS"] = "1"  # lets tests grab verification/reset tokens
 os.environ["AUTH_LOGIN_MAX_ATTEMPTS"] = "5"
 os.environ["AUTH_LOGIN_WINDOW_SECONDS"] = "60"

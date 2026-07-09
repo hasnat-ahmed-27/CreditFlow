@@ -5,6 +5,8 @@ venv/
 .venv/
 .pytest_cache/
 .mypy_cache/
+build/
+*.egg-info/
 
 # Env / secrets
 .env
