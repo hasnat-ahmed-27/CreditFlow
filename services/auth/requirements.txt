@@ -1,0 +1,13 @@
+# Service-specific deps only. The shared `creditflow_common` package (and its
+# deps: pyjwt, pika, sqlalchemy, psycopg, redis) is installed from /libs in the
+# Dockerfile.
+fastapi==0.111.0
+uvicorn[standard]==0.29.0
+python-dotenv==1.0.1
+# Password hashing (spec: bcrypt or argon2 via passlib — argon2 chosen).
+passlib==1.7.4
+argon2-cffi==23.1.0
+# Pydantic EmailStr validation for signup/login payloads.
+email-validator==2.1.1
+# Test-only: in-memory Redis so pytest runs without infra (CI installs this file).
+fakeredis==2.23.2
