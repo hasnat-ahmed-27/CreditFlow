@@ -254,6 +254,90 @@ def accept_invite(
 
 
 # --------------------------------------------------------------------------
+# Member management (roles, removal)
+# --------------------------------------------------------------------------
+
+def _manageable_target(db: Session, account_id: str, target_user_id: str, caller: AccountMember) -> AccountMember:
+    """Shared guard for role update + removal: the target must be a member,
+    must not be the owner (untouchable), and an admin may only manage plain
+    members — admins are peers, only the owner outranks them."""
+    target = get_membership(db, account_id, target_user_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail="User is not a member of this account")
+    if target.role == "owner":
+        raise HTTPException(status_code=403, detail="The account owner cannot be modified or removed")
+    if caller.role == "admin" and target.role == "admin" and target.user_id != caller.user_id:
+        raise HTTPException(status_code=403, detail="Only the owner can manage admins")
+    return target
+
+
+@router.get("/accounts/{account_id}/members")
+def list_members(
+    account_id: str,
+    claims: dict = Depends(current_claims),
+    db: Session = Depends(database.get_db),
+) -> dict:
+    """Team-management screen: every member with their role (members can see
+    who they work with; only owner/admin can change anything)."""
+    require_member(db, account_id, claims)
+    rows = db.scalars(
+        select(AccountMember).where(AccountMember.account_id == account_id).order_by(AccountMember.joined_at)
+    ).all()
+    return {
+        "account_id": account_id,
+        "members": [
+            {"user_id": m.user_id, "role": m.role, "joined_at": m.joined_at.isoformat()} for m in rows
+        ],
+    }
+
+
+@router.patch("/accounts/{account_id}/members/{user_id}")
+def update_member_role(
+    account_id: str,
+    user_id: str,
+    body: schemas.UpdateMemberRoleRequest,
+    claims: dict = Depends(current_claims),
+    db: Session = Depends(database.get_db),
+) -> dict:
+    caller = require_manager(db, account_id, claims)
+    target = _manageable_target(db, account_id, user_id, caller)
+    # Promoting to admin is an owner decision — an admin minting more admins
+    # would let any admin escalate the whole team.
+    if body.role == "admin" and caller.role != "owner":
+        raise HTTPException(status_code=403, detail="Only the owner can promote to admin")
+    target.role = body.role
+    db.commit()
+    events.publish("account.updated", {
+        "account_id": account_id,
+        "change": "member_role_updated",
+        "user_id": user_id,
+        "role": body.role,
+        "updated_by_user_id": claims["sub"],
+    })
+    return {"account_id": account_id, "user_id": user_id, "role": body.role}
+
+
+@router.delete("/accounts/{account_id}/members/{user_id}")
+def remove_member(
+    account_id: str,
+    user_id: str,
+    claims: dict = Depends(current_claims),
+    db: Session = Depends(database.get_db),
+) -> dict:
+    caller = require_manager(db, account_id, claims)
+    target = _manageable_target(db, account_id, user_id, caller)
+    db.delete(target)
+    db.commit()
+    events.publish("account.updated", {
+        "account_id": account_id,
+        "change": "member_removed",
+        "user_id": user_id,
+        "updated_by_user_id": claims["sub"],
+    })
+    return {"account_id": account_id, "user_id": user_id, "message": "Member removed"}
+
+
+# --------------------------------------------------------------------------
 # Account switcher + Auth integration
 # --------------------------------------------------------------------------
 
