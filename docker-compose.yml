@@ -102,6 +102,31 @@ services:
       timeout: 5s
       retries: 5
 
+  # ---- User/Tenant: accounts, membership, roles, invites ----
+  user:
+    build:
+      context: .                          # repo root so libs/ is in the build context
+      dockerfile: services/user/Dockerfile
+    environment:
+      SERVICE_NAME: user
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-creditflow}:${POSTGRES_PASSWORD:-creditflow}@postgres:5432/${POSTGRES_DB:-creditflow}
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-creditflow}:${RABBITMQ_PASS:-creditflow}@rabbitmq:5672/
+      JWT_PUBLIC_KEY_PATH: /keys/jwt_public.pem   # public key only — this service verifies, never mints
+      USER_EXPOSE_DEV_TOKENS: "1"   # DEV ONLY: echoes invite tokens in responses until the Notification service exists
+    ports: ["8002:8000"]
+    volumes:
+      - ./keys:/keys:ro
+    depends_on:
+      postgres: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+    networks: [creditflow]
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
 networks:
   creditflow:
     driver: bridge
