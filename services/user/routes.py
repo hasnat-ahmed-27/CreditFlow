@@ -20,18 +20,26 @@ Role hierarchy (owner > admin > member):
 """
 from __future__ import annotations
 
+from datetime import timedelta
+
 from fastapi import APIRouter, Depends, Header, HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from creditflow_common import jwt_utils
+from creditflow_common import config, jwt_utils
 
 import database
 import events
 import schemas
-from models import Account, AccountMember
+import security
+from models import Account, AccountMember, Invite, as_aware, utcnow
 
 router = APIRouter(tags=["user"])
+
+INVITE_TTL_SECONDS = int(config.env("USER_INVITE_TTL_SECONDS", str(7 * 24 * 3600)))
+# Dev convenience: echo the raw invite token in the response so the flow can be
+# tested with curl before the Notification service exists. NEVER enable in prod.
+EXPOSE_DEV_TOKENS = config.env("USER_EXPOSE_DEV_TOKENS", "0") == "1"
 
 
 def current_claims(authorization: str = Header(default="")) -> dict:
@@ -149,6 +157,100 @@ def update_account(
         "updated_by_user_id": claims["sub"],
     })
     return _account_profile(db, account)
+
+
+# --------------------------------------------------------------------------
+# Team invites
+# --------------------------------------------------------------------------
+
+@router.post("/accounts/{account_id}/invites", status_code=201)
+def create_invite(
+    account_id: str,
+    body: schemas.InviteRequest,
+    claims: dict = Depends(current_claims),
+    db: Session = Depends(database.get_db),
+) -> dict:
+    """Owner/admin invites an email address into the team. We store only the
+    token's hash; the raw token rides the invite.created event so the
+    Notification service can email the link."""
+    require_manager(db, account_id, claims)
+    account = db.get(Account, account_id)
+    if account.type != "team":
+        # Spec §6: an individual account has exactly one member — inviting
+        # into one would silently turn it into a team.
+        raise HTTPException(status_code=400, detail="Only team accounts can invite members")
+
+    email = body.email.lower()
+    pending = db.scalar(select(Invite).where(
+        Invite.account_id == account_id, Invite.email == email, Invite.status == "pending"
+    ))
+    if pending is not None and as_aware(pending.expires_at) > utcnow():
+        raise HTTPException(status_code=409, detail="A pending invite for this email already exists")
+
+    token = security.new_invite_token()
+    invite = Invite(
+        account_id=account_id,
+        email=email,
+        role=body.role,
+        token_hash=security.hash_token(token),
+        invited_by_user_id=claims["sub"],
+        expires_at=utcnow() + timedelta(seconds=INVITE_TTL_SECONDS),
+    )
+    db.add(invite)
+    db.commit()
+
+    events.publish("invite.created", {
+        "invite_id": invite.id,
+        "account_id": account_id,
+        "account_name": account.name,
+        "email": email,
+        "role": invite.role,
+        "invite_token": token,
+        "expires_at": invite.expires_at.isoformat(),
+        "invited_by_user_id": claims["sub"],
+    })
+
+    resp = {"invite_id": invite.id, "email": email, "role": invite.role,
+            "expires_at": invite.expires_at.isoformat(), "message": "Invite email queued"}
+    if EXPOSE_DEV_TOKENS:
+        resp["dev_invite_token"] = token
+    return resp
+
+
+@router.post("/invites/accept")
+def accept_invite(
+    body: schemas.AcceptInviteRequest,
+    claims: dict = Depends(current_claims),
+    db: Session = Depends(database.get_db),
+) -> dict:
+    """The invitee (logged in, so we know their user_id) redeems the emailed
+    token: membership row is created and member.joined is published. The token
+    is the capability — possession of the emailed link is what authorizes
+    joining, matching how every invite email works."""
+    invite = db.scalar(select(Invite).where(Invite.token_hash == security.hash_token(body.token)))
+    if invite is None or invite.status != "pending" or as_aware(invite.expires_at) < utcnow():
+        raise HTTPException(status_code=400, detail="Invalid or expired invite token")
+
+    user_id = claims["sub"]
+    if get_membership(db, invite.account_id, user_id) is not None:
+        raise HTTPException(status_code=409, detail="Already a member of this account")
+
+    invite.status = "accepted"  # single-use
+    invite.accepted_by_user_id = user_id
+    invite.accepted_at = utcnow()
+    db.add(AccountMember(account_id=invite.account_id, user_id=user_id, role=invite.role))
+    db.commit()
+
+    account = db.get(Account, invite.account_id)
+    events.publish("member.joined", {
+        "account_id": invite.account_id,
+        "account_name": account.name,
+        "user_id": user_id,
+        "email": invite.email,
+        "role": invite.role,
+    })
+    return {"account_id": invite.account_id, "account_name": account.name, "role": invite.role,
+            "message": "Invite accepted"}
 
 
 # --------------------------------------------------------------------------
