@@ -9,6 +9,7 @@ belong to which account and with what role.
 from __future__ import annotations
 
 import os
+import threading
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -17,11 +18,18 @@ from fastapi.middleware.cors import CORSMiddleware
 import database
 
 SERVICE_NAME = os.getenv("SERVICE_NAME", "user")
+# Tests set this to 0: pytest runs with no broker and stubs the handler directly.
+CONSUMER_ENABLED = os.getenv("USER_CONSUMER_ENABLED", "1") == "1"
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     database.init_db()  # create schema + tables on startup (spec-sanctioned simple path)
+    if CONSUMER_ENABLED:
+        import consumer
+        # Daemon thread: pika's BlockingConnection would otherwise block the
+        # event loop, and daemon=True lets uvicorn shut down cleanly.
+        threading.Thread(target=consumer.run, name="user-consumer", daemon=True).start()
     yield
 
 
