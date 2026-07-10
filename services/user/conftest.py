@@ -1,0 +1,82 @@
+"""
+Test bootstrap. Must run BEFORE any app import: creditflow_common.config reads
+the environment at import time, so we point it at throwaway/test resources
+here — SQLite instead of Postgres and an EPHEMERAL RS256 keypair (the real
+private key is gitignored, so CI never has it; tests sign their own tokens
+with the throwaway key and the app verifies with its public half). The
+RabbitMQ consumer thread is disabled — tests call consumer.handle_event
+directly, exercising the exact function the broker would — and the publisher
+is stubbed. This is why the suite runs in CI with no infra containers and no
+secrets.
+"""
+from __future__ import annotations
+
+import os
+import tempfile
+import uuid
+
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+
+_TMP = tempfile.mkdtemp(prefix="creditflow_user_test_")
+_DB_FILE = os.path.join(_TMP, f"user_{uuid.uuid4().hex}.db")
+_PRIV_PEM = os.path.join(_TMP, "jwt_private.pem")
+_PUB_PEM = os.path.join(_TMP, "jwt_public.pem")
+
+_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+with open(_PRIV_PEM, "wb") as f:
+    f.write(_key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    ))
+with open(_PUB_PEM, "wb") as f:
+    f.write(_key.public_key().public_bytes(
+        serialization.Encoding.PEM,
+        serialization.PublicFormat.SubjectPublicKeyInfo,
+    ))
+
+os.environ["DATABASE_URL"] = f"sqlite:///{_DB_FILE}"
+os.environ["JWT_PRIVATE_KEY_PATH"] = _PRIV_PEM
+os.environ["JWT_PUBLIC_KEY_PATH"] = _PUB_PEM
+os.environ["USER_CONSUMER_ENABLED"] = "0"   # no broker in tests
+os.environ["USER_EXPOSE_DEV_TOKENS"] = "1"  # lets tests grab invite tokens
+
+import pytest  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
+
+import database  # noqa: E402
+import events  # noqa: E402
+import main  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def published_events(monkeypatch):
+    """Capture events instead of talking to RabbitMQ; returns [(routing_key, payload)].
+    Covers both the routes and the consumer — each calls events.publish."""
+    captured: list[tuple[str, dict]] = []
+
+    def _fake_publish(routing_key: str, payload: dict) -> str:
+        captured.append((routing_key, payload))
+        return "test-event-id"
+
+    monkeypatch.setattr(events, "publish", _fake_publish)
+    return captured
+
+
+@pytest.fixture()
+def client():
+    # Context manager triggers the lifespan (DB init) like a real startup.
+    with TestClient(main.app) as c:
+        yield c
+
+
+@pytest.fixture()
+def db_session(client):
+    """Direct DB access for test setup/inspection (e.g. expiring an invite).
+    Depends on `client` so init_db has run."""
+    db = database.SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
