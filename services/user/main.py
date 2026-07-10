@@ -16,6 +16,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 import database
+import routes
 
 SERVICE_NAME = os.getenv("SERVICE_NAME", "user")
 # Tests set this to 0: pytest runs with no broker and stubs the handler directly.
@@ -42,6 +43,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.include_router(routes.router)
 
 
 @app.get("/health")
