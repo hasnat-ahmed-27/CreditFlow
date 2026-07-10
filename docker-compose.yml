@@ -72,24 +72,35 @@ services:
       retries: 10
 
   # =========================================================================
-  # Application services are added here as each phase is built. Template:
-  #
-  #   auth:
-  #     build: ./services/auth
-  #     env_file: .env
-  #     environment:
-  #       DATABASE_URL: postgresql+psycopg://creditflow:creditflow@postgres:5432/creditflow
-  #       REDIS_URL: redis://redis:6379/0
-  #       RABBITMQ_URL: amqp://creditflow:creditflow@rabbitmq:5672/
-  #       JWT_PUBLIC_KEY_PATH: /keys/jwt_public.pem
-  #       JWT_PRIVATE_KEY_PATH: /keys/jwt_private.pem   # auth only
-  #     volumes:
-  #       - ./keys:/keys:ro
-  #     depends_on:
-  #       postgres: { condition: service_healthy }
-  #       rabbitmq: { condition: service_healthy }
-  #     networks: [creditflow]
+  # Application services (one block per phase as it is built)
   # =========================================================================
+
+  # ---- Auth: identity, JWT issuance (only holder of the private key) ----
+  auth:
+    build:
+      context: .                          # repo root so libs/ is in the build context
+      dockerfile: services/auth/Dockerfile
+    environment:
+      SERVICE_NAME: auth
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-creditflow}:${POSTGRES_PASSWORD:-creditflow}@postgres:5432/${POSTGRES_DB:-creditflow}
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-creditflow}:${RABBITMQ_PASS:-creditflow}@rabbitmq:5672/
+      JWT_PUBLIC_KEY_PATH: /keys/jwt_public.pem
+      JWT_PRIVATE_KEY_PATH: /keys/jwt_private.pem   # auth only — other services get just the public key
+      AUTH_EXPOSE_DEV_TOKENS: "1"   # DEV ONLY: echoes verification/reset tokens in responses until the Notification service exists
+    ports: ["8001:8000"]
+    volumes:
+      - ./keys:/keys:ro
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+    networks: [creditflow]
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
 networks:
   creditflow:
