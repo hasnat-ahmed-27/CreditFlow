@@ -1,0 +1,8 @@
+# Service-specific deps only. The shared `creditflow_common` package (and its
+# deps: pyjwt[crypto], pika, sqlalchemy, psycopg, redis) is installed from
+# /libs in the Dockerfile.
+fastapi==0.111.0
+uvicorn[standard]==0.29.0
+python-dotenv==1.0.1
+# Stripe SDK — used with TEST-MODE keys only (enforced in stripe_gateway.init).
+stripe==15.3.0

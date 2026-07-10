@@ -127,6 +127,35 @@ services:
       timeout: 5s
       retries: 5
 
+  # ---- Billing: Stripe (test mode), subscriptions, dunning, transactional outbox ----
+  billing:
+    build:
+      context: .                          # repo root so libs/ is in the build context
+      dockerfile: services/billing/Dockerfile
+    environment:
+      SERVICE_NAME: billing
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-creditflow}:${POSTGRES_PASSWORD:-creditflow}@postgres:5432/${POSTGRES_DB:-creditflow}
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-creditflow}:${RABBITMQ_PASS:-creditflow}@rabbitmq:5672/
+      JWT_PUBLIC_KEY_PATH: /keys/jwt_public.pem   # public key only — this service verifies, never mints
+      # Stripe TEST-MODE keys only (sk_test_... enforced at startup) — set in .env
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+      STRIPE_PRICE_PRO: ${STRIPE_PRICE_PRO:-}
+      STRIPE_PRICE_TEAM: ${STRIPE_PRICE_TEAM:-}
+      BILLING_POLLER_ENABLED: "1"   # outbox poller + dunning ticker run in-process (thread)
+    ports: ["8003:8000"]
+    volumes:
+      - ./keys:/keys:ro
+    depends_on:
+      postgres: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+    networks: [creditflow]
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
 networks:
   creditflow:
     driver: bridge
