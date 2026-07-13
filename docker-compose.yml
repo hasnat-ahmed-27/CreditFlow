@@ -156,6 +156,30 @@ services:
       timeout: 5s
       retries: 5
 
+  # ---- Credits/Marketplace: append-only ledger, invoice.paid grants, P2P transfers ----
+  credits:
+    build:
+      context: .                          # repo root so libs/ is in the build context
+      dockerfile: services/credits/Dockerfile
+    environment:
+      SERVICE_NAME: credits
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-creditflow}:${POSTGRES_PASSWORD:-creditflow}@postgres:5432/${POSTGRES_DB:-creditflow}
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-creditflow}:${RABBITMQ_PASS:-creditflow}@rabbitmq:5672/
+      JWT_PUBLIC_KEY_PATH: /keys/jwt_public.pem   # public key only — this service verifies, never mints
+      CREDITS_CONSUMER_ENABLED: "1"   # billing_events consumer runs in-process (thread)
+    ports: ["8004:8000"]
+    volumes:
+      - ./keys:/keys:ro
+    depends_on:
+      postgres: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+    networks: [creditflow]
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
 networks:
   creditflow:
     driver: bridge
