@@ -1,0 +1,332 @@
+"""
+Credits service tests: invoice.paid grants credits, the consumer is
+idempotent (event_id replay AND fresh-event_id/same-invoice replay),
+refund.issued claws back the matching grant exactly once, the marketplace
+transfer is atomic (both ledger rows or neither), the balance is always
+derived from the ledger, over-balance debits/transfers are rejected, and
+credits.credited / credits.debited / credits.low_balance are emitted.
+
+No infra: SQLite via conftest, consumer.handle_event called directly (the
+exact function the broker would call), publisher stubbed.
+"""
+from __future__ import annotations
+
+import uuid
+
+from sqlalchemy import select
+
+from creditflow_common import jwt_utils
+from creditflow_common.idempotency import ProcessedEvent
+
+import consumer
+import ledger
+from models import LedgerEntry, MarketplaceListing
+
+
+def _uid() -> str:
+    return str(uuid.uuid4())
+
+
+def _auth(account_id: str, role: str = "owner", user_id: str | None = None) -> dict:
+    """Bearer header signed with the test keypair — mimics what Auth issues."""
+    token, _ = jwt_utils.sign_access_token(user_id or _uid(), account_id, role)
+    return {"Authorization": f"Bearer {token}"}
+
+
+def _invoice_paid(account_id: str, plan: str = "pro", amount_paid: int = 2900,
+                  stripe_invoice_id: str | None = None, event_id: str | None = None) -> tuple[dict, str]:
+    """(payload, event_id) shaped exactly like Billing's outbox emits it."""
+    return {
+        "account_id": account_id,
+        "plan": plan,
+        "stripe_invoice_id": stripe_invoice_id or f"in_{uuid.uuid4().hex[:8]}",
+        "amount_paid": amount_paid,
+        "currency": "usd",
+        "dunning_recovered": False,
+    }, event_id or f"evt_{uuid.uuid4().hex}"
+
+
+def _refund_issued(account_id: str, amount: int = 2900, stripe_refund_id: str | None = None) -> tuple[dict, str]:
+    return {
+        "account_id": account_id,
+        "refund_id": _uid(),
+        "stripe_refund_id": stripe_refund_id or f"re_{uuid.uuid4().hex[:8]}",
+        "stripe_payment_intent_id": f"pi_{uuid.uuid4().hex[:8]}",
+        "invoice_id": _uid(),
+        "amount": amount,
+        "currency": "usd",
+        "reason": "requested_by_customer",
+    }, f"evt_{uuid.uuid4().hex}"
+
+
+def _balance(client, account_id: str) -> int:
+    r = client.get("/credits/balance", headers=_auth(account_id))
+    assert r.status_code == 200, r.text
+    return r.json()["balance"]
+
+
+def _entries(db, account_id: str) -> list[LedgerEntry]:
+    db.expire_all()
+    return db.scalars(select(LedgerEntry).where(LedgerEntry.account_id == account_id)
+                      .order_by(LedgerEntry.created_at, LedgerEntry.id)).all()
+
+
+def _grant(client, account_id: str, plan: str = "pro") -> None:
+    payload, event_id = _invoice_paid(account_id, plan=plan)
+    consumer.handle_event("invoice.paid", payload, event_id)
+
+
+# --------------------------------------------------------------------------
+# Consumer: invoice.paid -> credit grant
+# --------------------------------------------------------------------------
+
+def test_invoice_paid_credits_account(client, db_session, published_events):
+    account_id = _uid()
+    payload, event_id = _invoice_paid(account_id, plan="pro")
+    consumer.handle_event("invoice.paid", payload, event_id)
+
+    assert _balance(client, account_id) == ledger.PLAN_CREDITS["pro"]
+    entries = _entries(db_session, account_id)
+    assert len(entries) == 1
+    assert entries[0].entry_type == "purchase_grant"
+    assert entries[0].stripe_ref == payload["stripe_invoice_id"]
+    assert entries[0].money_amount_cents == 2900
+    # processed_events recorded the event_id (spec §7)
+    assert db_session.get(ProcessedEvent, event_id) is not None
+    assert [rk for rk, _ in published_events] == ["credits.credited"]
+    assert published_events[0][1]["amount"] == ledger.PLAN_CREDITS["pro"]
+
+
+def test_consumer_idempotent_on_event_redelivery(client, db_session, published_events):
+    """Same event delivered twice (broker redelivery) -> credited ONCE."""
+    account_id = _uid()
+    payload, event_id = _invoice_paid(account_id, plan="team")
+    consumer.handle_event("invoice.paid", payload, event_id)
+    consumer.handle_event("invoice.paid", payload, event_id)  # redelivery
+
+    assert _balance(client, account_id) == ledger.PLAN_CREDITS["team"]
+    assert len(_entries(db_session, account_id)) == 1
+    assert [rk for rk, _ in published_events] == ["credits.credited"]  # announced once
+
+
+def test_consumer_idempotent_on_fresh_event_id_same_invoice(client, db_session):
+    """Producer re-emits the SAME invoice under a NEW event_id -> the
+    business-key guard (stripe_invoice_id) still prevents double-crediting."""
+    account_id = _uid()
+    payload, event_id = _invoice_paid(account_id)
+    consumer.handle_event("invoice.paid", payload, event_id)
+    consumer.handle_event("invoice.paid", payload, f"evt_{uuid.uuid4().hex}")
+
+    assert _balance(client, account_id) == ledger.PLAN_CREDITS["pro"]
+    assert len(_entries(db_session, account_id)) == 1
+
+
+def test_unknown_plan_grants_nothing(client, db_session):
+    account_id = _uid()
+    payload, event_id = _invoice_paid(account_id, plan="free")
+    consumer.handle_event("invoice.paid", payload, event_id)
+    assert _balance(client, account_id) == 0
+    assert _entries(db_session, account_id) == []
+
+
+# --------------------------------------------------------------------------
+# Consumer: refund.issued -> claw-back
+# --------------------------------------------------------------------------
+
+def test_refund_claws_back_matching_grant(client, db_session, published_events):
+    account_id = _uid()
+    _grant(client, account_id, plan="pro")  # +1000, money 2900
+
+    payload, event_id = _refund_issued(account_id, amount=2900)
+    consumer.handle_event("refund.issued", payload, event_id)
+
+    assert _balance(client, account_id) == 0
+    entries = _entries(db_session, account_id)
+    assert [e.entry_type for e in entries] == ["purchase_grant", "refund_clawback"]
+    clawback = entries[1]
+    assert clawback.amount == -entries[0].amount
+    assert clawback.related_entry_id == entries[0].id  # points at the grant it reverses
+    assert clawback.stripe_ref == payload["stripe_refund_id"]
+    rks = [rk for rk, _ in published_events]
+    assert "credits.debited" in rks
+    assert "credits.low_balance" in rks  # 1000 -> 0 crosses the threshold
+
+    # Redelivery of the same refund: no double claw-back.
+    consumer.handle_event("refund.issued", payload, event_id)
+    assert _balance(client, account_id) == 0
+    assert len(_entries(db_session, account_id)) == 2
+
+
+def test_second_refund_cannot_reverse_same_grant(client, db_session):
+    """A DIFFERENT refund event (new event_id, new refund id) finds the only
+    grant already reversed -> nothing more to claw back."""
+    account_id = _uid()
+    _grant(client, account_id)
+    consumer.handle_event("refund.issued", *_refund_issued(account_id, amount=2900))
+    consumer.handle_event("refund.issued", *_refund_issued(account_id, amount=2900))
+
+    assert _balance(client, account_id) == 0  # not -1000
+    assert len(_entries(db_session, account_id)) == 2
+
+
+def test_refund_without_grant_is_noop(client, db_session):
+    account_id = _uid()
+    consumer.handle_event("refund.issued", *_refund_issued(account_id))
+    assert _balance(client, account_id) == 0
+    assert _entries(db_session, account_id) == []
+
+
+# --------------------------------------------------------------------------
+# Balance + history are derived from the ledger; consumption
+# --------------------------------------------------------------------------
+
+def test_balance_is_sum_of_ledger_rows(client, db_session):
+    account_id = _uid()
+    _grant(client, account_id, plan="pro")    # +1000
+    r = client.post("/credits/consume", json={"amount": 300, "reason": "ai generation"},
+                    headers=_auth(account_id, role="member"))
+    assert r.status_code == 201, r.text
+    _grant(client, account_id, plan="team")   # +5000
+
+    entries = _entries(db_session, account_id)
+    assert [e.amount for e in entries] == [1000, -300, 5000]
+    assert _balance(client, account_id) == sum(e.amount for e in entries) == 5700
+
+    r = client.get("/credits/history", headers=_auth(account_id, role="member"))
+    body = r.json()
+    assert body["balance"] == 5700
+    assert [e["amount"] for e in body["entries"]] == [5000, -300, 1000]  # newest first
+    assert body["entries"][1]["entry_type"] == "usage_debit"
+
+
+def test_over_balance_debit_rejected(client, db_session, published_events):
+    account_id = _uid()
+    _grant(client, account_id, plan="pro")  # 1000
+    r = client.post("/credits/consume", json={"amount": 1001}, headers=_auth(account_id))
+    assert r.status_code == 409
+    assert _balance(client, account_id) == 1000
+    assert len(_entries(db_session, account_id)) == 1  # no debit row written
+    assert [rk for rk, _ in published_events] == ["credits.credited"]  # only the grant
+
+
+def test_low_balance_emitted_once_on_crossing(client, published_events):
+    account_id = _uid()
+    _grant(client, account_id, plan="pro")  # 1000
+    client.post("/credits/consume", json={"amount": 950}, headers=_auth(account_id))  # -> 50: crosses
+    client.post("/credits/consume", json={"amount": 10}, headers=_auth(account_id))   # -> 40: already below
+
+    low = [p for rk, p in published_events if rk == "credits.low_balance"]
+    assert len(low) == 1
+    assert low[0] == {"account_id": account_id, "balance": 50, "threshold": ledger.LOW_BALANCE_THRESHOLD}
+
+
+def test_endpoints_require_valid_token(client):
+    assert client.get("/credits/balance").status_code == 401
+    assert client.get("/credits/history", headers={"Authorization": "Bearer garbage"}).status_code == 401
+
+
+# --------------------------------------------------------------------------
+# Marketplace: list -> purchase transfers atomically
+# --------------------------------------------------------------------------
+
+def _list_credits(client, seller: str, amount: int = 200, price: int = 500) -> str:
+    r = client.post("/credits/marketplace/listings",
+                    json={"credits_amount": amount, "price_cents": price},
+                    headers=_auth(seller))
+    assert r.status_code == 201, r.text
+    return r.json()["listing_id"]
+
+
+def test_marketplace_purchase_transfers_credits_atomically(client, db_session, published_events):
+    seller, buyer = _uid(), _uid()
+    _grant(client, seller, plan="pro")  # 1000
+    listing_id = _list_credits(client, seller, amount=200, price=500)
+
+    r = client.post(f"/credits/marketplace/listings/{listing_id}/purchase", headers=_auth(buyer))
+    assert r.status_code == 201, r.text
+    assert r.json()["buyer_balance"] == 200
+
+    # Both sides of the transfer landed, as one +/- pair tied to the listing.
+    assert _balance(client, seller) == 800
+    assert _balance(client, buyer) == 200
+    seller_rows = [e for e in _entries(db_session, seller) if e.listing_id == listing_id]
+    buyer_rows = [e for e in _entries(db_session, buyer) if e.listing_id == listing_id]
+    assert [e.amount for e in seller_rows] == [-200]
+    assert [e.amount for e in buyer_rows] == [200]
+    assert seller_rows[0].counterparty_account_id == buyer
+    assert buyer_rows[0].counterparty_account_id == seller
+
+    listing = db_session.get(MarketplaceListing, listing_id)
+    assert listing.status == "sold"
+    assert listing.buyer_account_id == buyer
+    assert listing.sold_at is not None
+
+    rks = [rk for rk, _ in published_events]
+    assert rks.count("credits.debited") == 1   # seller side
+    assert rks.count("credits.credited") == 2  # grant + buyer side
+
+
+def test_listing_rejected_over_balance(client, db_session):
+    seller = _uid()
+    _grant(client, seller, plan="pro")  # 1000
+    r = client.post("/credits/marketplace/listings",
+                    json={"credits_amount": 1001, "price_cents": 500}, headers=_auth(seller))
+    assert r.status_code == 409
+    assert db_session.scalars(select(MarketplaceListing)).all() == []
+
+
+def test_purchase_rejected_when_seller_spent_the_credits(client, db_session):
+    """No escrow at list time -> the purchase transaction re-checks the
+    seller's balance; failure leaves NO ledger rows and the listing open
+    (the atomicity guarantee, exercised via the rollback path)."""
+    seller, buyer = _uid(), _uid()
+    _grant(client, seller, plan="pro")  # 1000
+    listing_id = _list_credits(client, seller, amount=200)
+    client.post("/credits/consume", json={"amount": 900}, headers=_auth(seller))  # balance 100 < 200
+
+    r = client.post(f"/credits/marketplace/listings/{listing_id}/purchase", headers=_auth(buyer))
+    assert r.status_code == 409
+    assert _balance(client, buyer) == 0                      # buyer NOT credited
+    assert _balance(client, seller) == 100                   # seller NOT debited
+    assert not [e for e in _entries(db_session, seller) if e.listing_id == listing_id]
+    assert db_session.get(MarketplaceListing, listing_id).status == "open"  # claim rolled back
+
+
+def test_sold_listing_cannot_be_purchased_again(client, db_session):
+    seller, buyer1, buyer2 = _uid(), _uid(), _uid()
+    _grant(client, seller, plan="pro")
+    listing_id = _list_credits(client, seller, amount=200)
+    assert client.post(f"/credits/marketplace/listings/{listing_id}/purchase",
+                       headers=_auth(buyer1)).status_code == 201
+    assert client.post(f"/credits/marketplace/listings/{listing_id}/purchase",
+                       headers=_auth(buyer2)).status_code == 409
+    assert _balance(client, buyer2) == 0
+    assert _balance(client, seller) == 800  # debited exactly once
+
+
+def test_cannot_buy_own_listing_and_marketplace_is_owner_only(client):
+    seller = _uid()
+    _grant(client, seller, plan="pro")
+    listing_id = _list_credits(client, seller, amount=100)
+    # own listing
+    assert client.post(f"/credits/marketplace/listings/{listing_id}/purchase",
+                       headers=_auth(seller)).status_code == 409
+    # member role may browse but not sell/buy
+    member = _auth(_uid(), role="member")
+    assert client.get("/credits/marketplace/listings", headers=member).status_code == 200
+    assert client.post("/credits/marketplace/listings",
+                       json={"credits_amount": 10, "price_cents": 10}, headers=member).status_code == 403
+    assert client.post(f"/credits/marketplace/listings/{listing_id}/purchase",
+                       headers=member).status_code == 403
+
+
+def test_canceled_listing_disappears_and_cannot_sell(client):
+    seller, buyer = _uid(), _uid()
+    _grant(client, seller, plan="pro")
+    listing_id = _list_credits(client, seller, amount=100)
+    r = client.delete(f"/credits/marketplace/listings/{listing_id}", headers=_auth(seller))
+    assert r.status_code == 200 and r.json()["status"] == "canceled"
+    assert client.get("/credits/marketplace/listings",
+                      headers=_auth(buyer)).json()["listings"] == []
+    assert client.post(f"/credits/marketplace/listings/{listing_id}/purchase",
+                       headers=_auth(buyer)).status_code == 409
