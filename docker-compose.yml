@@ -180,6 +180,33 @@ services:
       timeout: 5s
       retries: 5
 
+  # ---- Usage/Metering: Redis quota counters (fast checks) + append-only usage_ledger (durable truth) ----
+  usage:
+    build:
+      context: .                          # repo root so libs/ is in the build context
+      dockerfile: services/usage/Dockerfile
+    environment:
+      SERVICE_NAME: usage
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-creditflow}:${POSTGRES_PASSWORD:-creditflow}@postgres:5432/${POSTGRES_DB:-creditflow}
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-creditflow}:${RABBITMQ_PASS:-creditflow}@rabbitmq:5672/
+      JWT_PUBLIC_KEY_PATH: /keys/jwt_public.pem   # public key only — this service verifies, never mints
+      USAGE_CONSUMER_ENABLED: "1"   # usage_events consumer runs in-process (thread); declares our durable queue before the AI service exists
+      USAGE_QUOTA_TOKENS: "100000"  # monthly token quota per account (80%/100% threshold events derive from this)
+    ports: ["8005:8000"]
+    volumes:
+      - ./keys:/keys:ro
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+    networks: [creditflow]
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
 networks:
   creditflow:
     driver: bridge
