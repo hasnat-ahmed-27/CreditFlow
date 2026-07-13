@@ -17,6 +17,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 import database
+import marketplace
 import routes
 
 SERVICE_NAME = os.getenv("SERVICE_NAME", "credits")
@@ -46,6 +47,7 @@ app.add_middleware(
 )
 
 app.include_router(routes.router)
+app.include_router(marketplace.router)
 
 
 @app.get("/health")
