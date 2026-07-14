@@ -207,6 +207,36 @@ services:
       timeout: 5s
       retries: 5
 
+  # ---- AI Generation: OpenRouter streaming -> Redis pub/sub fan-out -> SSE ----
+  ai:
+    build:
+      context: .                          # repo root so libs/ is in the build context
+      dockerfile: services/ai/Dockerfile
+    environment:
+      SERVICE_NAME: ai
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-creditflow}:${POSTGRES_PASSWORD:-creditflow}@postgres:5432/${POSTGRES_DB:-creditflow}
+      REDIS_URL: redis://redis:6379/0
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-creditflow}:${RABBITMQ_PASS:-creditflow}@rabbitmq:5672/
+      JWT_PUBLIC_KEY_PATH: /keys/jwt_public.pem   # public key only — this service verifies, never mints
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}   # set in .env — required for real generations
+      USAGE_URL: http://usage:8000    # synchronous quota gate before every generation
+      AI_MODEL_FAST: ${AI_MODEL_FAST:-openai/gpt-4o-mini}            # cheap/fast choice
+      AI_MODEL_QUALITY: ${AI_MODEL_QUALITY:-anthropic/claude-sonnet-4}  # higher-quality choice
+    ports: ["8006:8000"]
+    volumes:
+      - ./keys:/keys:ro
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+      usage: { condition: service_healthy }   # quota gate fails closed without it
+    networks: [creditflow]
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
 networks:
   creditflow:
     driver: bridge
