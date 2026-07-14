@@ -1,0 +1,12 @@
+# Service-specific deps only. The shared `creditflow_common` package (and its
+# deps: pyjwt[crypto], pika, sqlalchemy, psycopg, redis) is installed from
+# /libs in the Dockerfile.
+fastapi==0.111.0
+uvicorn[standard]==0.29.0
+python-dotenv==1.0.1
+# OpenRouter streaming + the synchronous Usage quota check (async HTTP).
+httpx>=0.27
+# Test-only: in-memory Redis so pytest runs without infra (CI installs this file).
+# >=2.26 supports the RESP3 HELLO handshake that modern redis-py sends on connect,
+# and its async client covers the pub/sub fan-out this service is built on.
+fakeredis>=2.26.0
