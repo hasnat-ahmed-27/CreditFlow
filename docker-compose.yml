@@ -450,6 +450,44 @@ services:
       redis: { condition: service_healthy }
     networks: [creditflow]
 
+  # ---- Notification: the central outbound-email consumer — drains the six
+  # notifications.* queues the other services pre-declared and sends via
+  # Resend (primary) / Mailgun (fallback), logging every send in
+  # notification_log. Emits notification.sent. With the providers unset,
+  # sends conclude as failed-and-logged (the *_EXPOSE_DEV_TOKENS stopgaps on
+  # auth/user still echo tokens for dev flows).
+  notification:
+    build:
+      context: .                          # repo root so libs/ is in the build context
+      dockerfile: services/notification/Dockerfile
+    environment:
+      SERVICE_NAME: notification
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-creditflow}:${POSTGRES_PASSWORD:-creditflow}@postgres:5432/${POSTGRES_DB:-creditflow}
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-creditflow}:${RABBITMQ_PASS:-creditflow}@rabbitmq:5672/
+      JWT_PUBLIC_KEY_PATH: /keys/jwt_public.pem   # public key only — this service verifies, never mints
+      NOTIFICATION_CONSUMER_ENABLED: "1"   # the six notifications.* queue consumers run in-process (threads)
+      # Email providers (free tier, per spec) — set in .env. Resend is
+      # primary; Mailgun is the fallback when both of its vars are set.
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      MAILGUN_API_KEY: ${MAILGUN_API_KEY:-}
+      MAILGUN_DOMAIN: ${MAILGUN_DOMAIN:-}
+      # Sender identity — must be a sender/domain verified with the provider.
+      NOTIFY_FROM_EMAIL: ${NOTIFY_FROM_EMAIL:-CreditFlow <no-reply@creditflow.local>}
+      # Frontend base URL for the links in emails (verify/reset/invite/billing).
+      NOTIFY_APP_BASE_URL: ${NOTIFY_APP_BASE_URL:-http://localhost:5173}
+    ports: ["8011:8000"]
+    volumes:
+      - ./keys:/keys:ro
+    depends_on:
+      postgres: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+    networks: [creditflow]
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
 networks:
   creditflow:
     driver: bridge
