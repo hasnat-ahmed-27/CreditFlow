@@ -330,6 +330,46 @@ services:
       redis: { condition: service_healthy }
     networks: [creditflow]
 
+  # ---- Social Publishing: LinkedIn OAuth connections (tokens encrypted at
+  # rest) + text/image publishing. Consumes content.scheduled from the queue
+  # the Scheduler pre-declared and emits post.published / post.failed.
+  social:
+    build:
+      context: .                          # repo root so libs/ is in the build context
+      dockerfile: services/social/Dockerfile
+    environment:
+      SERVICE_NAME: social
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-creditflow}:${POSTGRES_PASSWORD:-creditflow}@postgres:5432/${POSTGRES_DB:-creditflow}
+      REDIS_URL: redis://redis:6379/0                 # OAuth CSRF-state store
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-creditflow}:${RABBITMQ_PASS:-creditflow}@rabbitmq:5672/
+      JWT_PUBLIC_KEY_PATH: /keys/jwt_public.pem   # public key only — this service verifies, never mints
+      SOCIAL_CONSUMER_ENABLED: "1"   # scheduler_events consumer runs in-process (thread); drains the queue the Scheduler pre-declared
+      CONTENT_URL: http://content:8000    # authoritative post body + stored media
+      # LinkedIn app registration — each developer brings their own (spec); set in .env
+      LINKEDIN_CLIENT_ID: ${LINKEDIN_CLIENT_ID:-}
+      LINKEDIN_CLIENT_SECRET: ${LINKEDIN_CLIENT_SECRET:-}
+      LINKEDIN_REDIRECT_URI: ${LINKEDIN_REDIRECT_URI:-}
+      # Fernet key for token-at-rest encryption — generate with:
+      #   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+      SOCIAL_TOKEN_ENCRYPTION_KEY: ${SOCIAL_TOKEN_ENCRYPTION_KEY:-}
+      # DEV ONLY stopgap until the service-auth story exists: a bearer the
+      # consumer uses to fetch authoritative content; unset, it degrades to
+      # the fire event's title/image_url mirrors (see services/social/consumer.py).
+      SOCIAL_CONTENT_TOKEN: ${SOCIAL_CONTENT_TOKEN:-}
+    ports: ["8009:8000"]
+    volumes:
+      - ./keys:/keys:ro
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+    networks: [creditflow]
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
 networks:
   creditflow:
     driver: bridge
