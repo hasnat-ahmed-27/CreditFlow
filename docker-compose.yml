@@ -263,6 +263,73 @@ services:
       timeout: 5s
       retries: 5
 
+  # ---- Scheduler: content calendar — Celery Beat scans due schedules, a
+  # worker task emits content.scheduled for the Social Publishing service.
+  # ONE image, THREE processes: the API below, plus scheduler-worker and
+  # scheduler-beat which override the command.
+  scheduler:
+    build:
+      context: .                          # repo root so libs/ is in the build context
+      dockerfile: services/scheduler/Dockerfile
+    environment:
+      SERVICE_NAME: scheduler
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-creditflow}:${POSTGRES_PASSWORD:-creditflow}@postgres:5432/${POSTGRES_DB:-creditflow}
+      REDIS_URL: redis://redis:6379/0                 # fire lock lives with the caching Redis
+      CELERY_BROKER_URL: redis://redis:6379/1         # broker+backend on their OWN logical DB (spec)
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-creditflow}:${RABBITMQ_PASS:-creditflow}@rabbitmq:5672/
+      JWT_PUBLIC_KEY_PATH: /keys/jwt_public.pem   # public key only — this service verifies, never mints
+      SCHEDULER_CONSUMER_ENABLED: "1"   # content_events consumer runs in-process (thread); drains the queue the Content service pre-declared
+    ports: ["8008:8000"]
+    volumes:
+      - ./keys:/keys:ro
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+    networks: [creditflow]
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Celery worker — executes the scan/fire tasks beat dispatches. No HTTP
+  # surface and never touches JWTs, so no port, no keys mount, no healthcheck
+  # (a `celery inspect ping` probe costs more than it tells here).
+  scheduler-worker:
+    build:
+      context: .
+      dockerfile: services/scheduler/Dockerfile
+    command: ["celery", "-A", "celery_app", "worker", "--loglevel=info"]
+    environment:
+      SERVICE_NAME: scheduler-worker
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-creditflow}:${POSTGRES_PASSWORD:-creditflow}@postgres:5432/${POSTGRES_DB:-creditflow}
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-creditflow}:${RABBITMQ_PASS:-creditflow}@rabbitmq:5672/
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+    networks: [creditflow]
+
+  # Celery beat — ticks tasks.scan_due_schedules every SCHEDULER_SCAN_INTERVAL
+  # seconds (default 60, the spec's example). Only talks to the broker.
+  scheduler-beat:
+    build:
+      context: .
+      dockerfile: services/scheduler/Dockerfile
+    command: ["celery", "-A", "celery_app", "beat", "--loglevel=info"]
+    environment:
+      SERVICE_NAME: scheduler-beat
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+    depends_on:
+      redis: { condition: service_healthy }
+    networks: [creditflow]
+
 networks:
   creditflow:
     driver: bridge
