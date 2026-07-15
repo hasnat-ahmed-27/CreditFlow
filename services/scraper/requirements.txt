@@ -1,0 +1,22 @@
+# Service-specific deps only. The shared `creditflow_common` package (and its
+# deps: pyjwt[crypto], pika, sqlalchemy, psycopg, redis) is installed from
+# /libs in the Dockerfile.
+fastapi==0.111.0
+uvicorn[standard]==0.29.0
+python-dotenv==1.0.1
+# Outbound HTTP: robots.txt fetches in scraper_engine.py (and TestClient transport).
+httpx>=0.27
+# Task queue + beat — the spec's "worker process for execution" and "internal
+# scheduler" for recurring scrapes; same pin as the Scheduler service.
+celery[redis]==5.4.0
+# MongoDB driver — all access lives in store.py.
+pymongo==4.10.1
+# HTML -> structured data extraction (scraper_engine.extract).
+beautifulsoup4>=4.12
+# Headless-browser fetch (spec: "Crawl4AI / Playwright"). The pip package is
+# light; the heavy browser binaries are installed in the Docker image only
+# (`playwright install`), NEVER in CI — scraper_engine imports it lazily and
+# tests mock the engine, so pytest needs no browser.
+playwright>=1.49
+# Test-only: in-memory MongoDB so pytest runs without infra (CI installs this file).
+mongomock==4.3.0

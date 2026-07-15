@@ -370,6 +370,86 @@ services:
       timeout: 5s
       retries: 5
 
+  # ---- Scraper: on-demand + recurring web scraping (Playwright/Chromium)
+  # into MongoDB (the stack's one document-store service). Consumes
+  # scrape.requested and emits scrape.completed / scrape.failed on
+  # scraper_events. ONE image, THREE processes (same pattern as the
+  # Scheduler): the API below, plus scraper-worker and scraper-beat which
+  # override the command.
+  scraper:
+    build:
+      context: .                          # repo root so libs/ is in the build context
+      dockerfile: services/scraper/Dockerfile
+    environment:
+      SERVICE_NAME: scraper
+      # Postgres holds ONLY the processed_events idempotency ledger (schema
+      # `scraper`) — domain data lives in Mongo per the spec.
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-creditflow}:${POSTGRES_PASSWORD:-creditflow}@postgres:5432/${POSTGRES_DB:-creditflow}
+      MONGO_URL: mongodb://${MONGO_USER:-creditflow}:${MONGO_PASS:-creditflow}@mongo:27017/
+      CELERY_BROKER_URL: redis://redis:6379/2         # broker+backend on their OWN logical DB (/1 is the Scheduler's)
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-creditflow}:${RABBITMQ_PASS:-creditflow}@rabbitmq:5672/
+      JWT_PUBLIC_KEY_PATH: /keys/jwt_public.pem   # public key only — this service verifies, never mints
+      SCRAPER_CONSUMER_ENABLED: "1"   # scrape.requested consumer runs in-process (thread)
+      # Engine config (see services/scraper/scraper_engine.py) — the API
+      # never scrapes, but shares the image/env with the worker.
+      SCRAPER_USER_AGENT: ${SCRAPER_USER_AGENT:-CreditFlowScraper/0.1}
+      SCRAPER_MIN_DELAY_SECONDS: ${SCRAPER_MIN_DELAY_SECONDS:-2}
+      SCRAPER_TIMEOUT_SECONDS: ${SCRAPER_TIMEOUT_SECONDS:-30}
+    ports: ["8010:8000"]
+    volumes:
+      - ./keys:/keys:ro
+    depends_on:
+      postgres: { condition: service_healthy }
+      mongo: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+    networks: [creditflow]
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Celery worker — executes the scan/scrape tasks; the ONLY container that
+  # launches Chromium. No HTTP surface and never touches JWTs, so no port,
+  # no keys mount, no healthcheck (same rationale as scheduler-worker).
+  scraper-worker:
+    build:
+      context: .
+      dockerfile: services/scraper/Dockerfile
+    command: ["celery", "-A", "celery_app", "worker", "--loglevel=info"]
+    environment:
+      SERVICE_NAME: scraper-worker
+      MONGO_URL: mongodb://${MONGO_USER:-creditflow}:${MONGO_PASS:-creditflow}@mongo:27017/
+      CELERY_BROKER_URL: redis://redis:6379/2
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-creditflow}:${RABBITMQ_PASS:-creditflow}@rabbitmq:5672/
+      SCRAPER_USER_AGENT: ${SCRAPER_USER_AGENT:-CreditFlowScraper/0.1}
+      SCRAPER_MIN_DELAY_SECONDS: ${SCRAPER_MIN_DELAY_SECONDS:-2}
+      SCRAPER_TIMEOUT_SECONDS: ${SCRAPER_TIMEOUT_SECONDS:-30}
+    depends_on:
+      mongo: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+    networks: [creditflow]
+
+  # Celery beat — the spec's "internal scheduler" for recurring scrapes:
+  # ticks tasks.scan_due_scrapes every SCRAPER_SCAN_INTERVAL seconds
+  # (default 60). Only talks to the broker.
+  scraper-beat:
+    build:
+      context: .
+      dockerfile: services/scraper/Dockerfile
+    command: ["celery", "-A", "celery_app", "beat", "--loglevel=info"]
+    environment:
+      SERVICE_NAME: scraper-beat
+      CELERY_BROKER_URL: redis://redis:6379/2
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+    depends_on:
+      redis: { condition: service_healthy }
+    networks: [creditflow]
+
 networks:
   creditflow:
     driver: bridge
