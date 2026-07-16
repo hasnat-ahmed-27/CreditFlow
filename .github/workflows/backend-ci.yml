@@ -24,7 +24,9 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install ./libs
-          pip install pytest httpx
+          # httpx<0.28 — newer httpx removed the API Starlette 0.37.2 (FastAPI 0.111)
+          # TestClient relies on, which otherwise breaks every TestClient-based test.
+          pip install pytest "httpx<0.28"
 
       - name: Test each service that has tests
         run: |
