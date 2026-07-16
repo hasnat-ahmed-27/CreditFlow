@@ -488,6 +488,41 @@ services:
       timeout: 5s
       retries: 5
 
+  # ---- Admin/Ops: operational visibility — audit_log built by consuming
+  # every domain event (`#`-bound on all ten exchanges, draining the
+  # admin.notification_events queue Notification pre-declared), active-
+  # session viewer/revocation reading the same Redis jti store Auth writes,
+  # cross-account directory with suspend/reactivate, and a read-only
+  # aggregate view pulled from User/Credits/Usage. Publishes nothing.
+  admin:
+    build:
+      context: .                          # repo root so libs/ is in the build context
+      dockerfile: services/admin/Dockerfile
+    environment:
+      SERVICE_NAME: admin
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-creditflow}:${POSTGRES_PASSWORD:-creditflow}@postgres:5432/${POSTGRES_DB:-creditflow}
+      REDIS_URL: redis://redis:6379/0                 # active-session (jti) store — Auth writes it, we read/revoke
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-creditflow}:${RABBITMQ_PASS:-creditflow}@rabbitmq:5672/
+      JWT_PUBLIC_KEY_PATH: /keys/jwt_public.pem   # public key only — this service verifies, never mints
+      ADMIN_CONSUMER_ENABLED: "1"   # the ten admin.* queue consumers run in-process (threads)
+      # Read-only aggregation targets for the per-account overview.
+      USER_URL: http://user:8000
+      CREDITS_URL: http://credits:8000
+      USAGE_URL: http://usage:8000
+    ports: ["8012:8000"]
+    volumes:
+      - ./keys:/keys:ro
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+    networks: [creditflow]
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
 networks:
   creditflow:
     driver: bridge
