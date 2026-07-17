@@ -570,6 +570,20 @@ services:
       timeout: 5s
       retries: 5
 
+  # ---- Frontend: static React/Vite bundle served by nginx ----
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        # Baked into the static bundle — where the BROWSER reaches the
+        # gateway, i.e. the host-published port, not the compose-internal DNS.
+        VITE_GATEWAY_URL: ${VITE_GATEWAY_URL:-http://localhost:8080}
+    ports: ["3000:80"]
+    depends_on:
+      gateway: { condition: service_healthy }
+    networks: [creditflow]
+
 networks:
   creditflow:
     driver: bridge
