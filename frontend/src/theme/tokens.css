@@ -1,0 +1,108 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ---------------------------------------------------------------------------
+   CreditFlow design tokens — single source of truth.
+   RGB channels (not hex) so Tailwind alpha modifiers compose: rgb(var(--x)/.5)
+   --------------------------------------------------------------------------- */
+:root {
+  color-scheme: dark;
+
+  /* planes */
+  --c-bg: 10 10 16;            /* page — deep near-black, slightly blue     */
+  --c-surface: 18 18 26;       /* cards                                     */
+  --c-surface-2: 24 24 36;     /* elevated / hover                          */
+  --c-surface-3: 31 31 46;     /* active / pressed                          */
+  --c-edge: 35 35 50;          /* hairline borders                          */
+  --c-edge-strong: 46 46 66;   /* emphasized borders                        */
+
+  /* ink */
+  --c-ink: 237 237 242;        /* primary text                              */
+  --c-ink-soft: 160 160 180;   /* secondary text                            */
+  --c-ink-faint: 106 106 128;  /* muted / placeholders                      */
+
+  /* accent — iris */
+  --c-accent-300: 172 178 255;
+  --c-accent-400: 139 147 255;
+  --c-accent-500: 109 116 246;
+  --c-accent-600: 93 99 230;
+  --c-accent-700: 76 81 198;
+
+  /* semantic */
+  --c-success: 52 211 153;
+  --c-warning: 251 191 36;
+  --c-danger: 248 113 113;
+  --c-info: 56 189 248;
+
+  /* chart series — dark-surface validated, fixed assignment order */
+  --c-series-1: 118 127 242;
+  --c-series-2: 25 158 112;
+  --c-series-3: 201 133 0;
+  --c-series-4: 213 81 129;
+
+  /* shape */
+  --radius-card: 0.75rem;
+  --radius-field: 0.5rem;
+}
+
+@layer base {
+  html {
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  body {
+    @apply bg-bg font-sans text-sm text-ink;
+  }
+
+  ::selection {
+    background: rgb(var(--c-accent-600) / 0.45);
+  }
+
+  /* Recessive scrollbars that fit the dark chrome */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: rgb(var(--c-edge-strong)) transparent;
+  }
+  *::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  *::-webkit-scrollbar-thumb {
+    background: rgb(var(--c-edge-strong));
+    border-radius: 8px;
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  /* One consistent, visible focus treatment everywhere */
+  :focus-visible {
+    outline: 2px solid rgb(var(--c-accent-500) / 0.9);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+}
+
+@layer utilities {
+  /* Numbers that must align vertically (tables, tickers) */
+  .tnum {
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Gradient text for hero moments — used sparingly */
+  .text-gradient {
+    background: linear-gradient(
+      100deg,
+      rgb(var(--c-accent-300)),
+      rgb(var(--c-accent-500)) 55%,
+      rgb(var(--c-info))
+    );
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+}
