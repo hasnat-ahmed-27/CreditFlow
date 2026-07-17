@@ -523,6 +523,53 @@ services:
       timeout: 5s
       retries: 5
 
+  # ---- API Gateway: the single public entry point (:8080). Routes each
+  # public path prefix to the owning service, forwards Authorization
+  # untouched (services verify RS256 themselves — no keys mounted here),
+  # applies CORS + per-IP rate limiting + X-Request-ID, and re-streams the
+  # AI service's SSE token stream chunk-by-chunk without buffering.
+  # Individual services keep their 80xx host ports for direct dev access.
+  gateway:
+    build:
+      context: .                          # repo root to match convention (gateway needs no libs/)
+      dockerfile: services/gateway/Dockerfile
+    environment:
+      SERVICE_NAME: gateway
+      AUTH_URL: http://auth:8000
+      USER_URL: http://user:8000
+      BILLING_URL: http://billing:8000
+      CREDITS_URL: http://credits:8000
+      USAGE_URL: http://usage:8000
+      AI_URL: http://ai:8000
+      CONTENT_URL: http://content:8000
+      SCHEDULER_URL: http://scheduler:8000
+      SOCIAL_URL: http://social:8000
+      SCRAPER_URL: http://scraper:8000
+      NOTIFICATION_URL: http://notification:8000
+      ADMIN_URL: http://admin:8000
+      GATEWAY_CORS_ORIGINS: ${GATEWAY_CORS_ORIGINS:-*}   # frontend origin(s), comma-separated
+      GATEWAY_RATE_LIMIT_PER_MINUTE: ${GATEWAY_RATE_LIMIT_PER_MINUTE:-120}
+    ports: ["8080:8000"]                  # the one public port
+    depends_on:
+      auth: { condition: service_healthy }
+      user: { condition: service_healthy }
+      billing: { condition: service_healthy }
+      credits: { condition: service_healthy }
+      usage: { condition: service_healthy }
+      ai: { condition: service_healthy }
+      content: { condition: service_healthy }
+      scheduler: { condition: service_healthy }
+      social: { condition: service_healthy }
+      scraper: { condition: service_healthy }
+      notification: { condition: service_healthy }
+      admin: { condition: service_healthy }
+    networks: [creditflow]
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
 networks:
   creditflow:
     driver: bridge
