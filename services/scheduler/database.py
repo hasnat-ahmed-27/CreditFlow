@@ -20,6 +20,10 @@ from sqlalchemy.orm import Session
 from creditflow_common import config
 from creditflow_common.db import Base, make_engine, make_session_factory
 
+# idempotency must be imported HERE (not only in consumer.py, which the
+# lifespan imports AFTER init_db's create_all) or a fresh database never gets
+# the processed_events table and every consumed event dead-letters.
+import creditflow_common.idempotency  # noqa: F401 — registers processed_events
 import models  # noqa: F401 — registers scheduled_posts/content_refs on Base.metadata
 
 engine = None
