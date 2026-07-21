@@ -9,6 +9,9 @@ passlib==1.7.4
 argon2-cffi==23.1.0
 # Pydantic EmailStr validation for signup/login payloads.
 email-validator==2.1.1
+# Outbound HTTP: user_client.py resolves the account_id/role claims from the
+# User service (and the TestClient transport).
+httpx>=0.27
 # Test-only: in-memory Redis so pytest runs without infra (CI installs this file).
 # >=2.26 supports the RESP3 HELLO handshake that modern redis-py sends on connect
 # (older fakeredis fails with: unknown command `hello`).
