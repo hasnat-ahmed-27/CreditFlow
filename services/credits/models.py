@@ -31,6 +31,7 @@ from creditflow_common.idempotency import ProcessedEvent  # noqa: F401
 
 # amount > 0 rows (credits in) vs amount < 0 rows (credits out).
 ENTRY_TYPES = (
+    "starter_grant",        # account.created consumed -> free-tier credits in
     "purchase_grant",       # invoice.paid consumed -> plan credits in
     "refund_clawback",      # refund.issued consumed -> grant reversed
     "usage_debit",          # POST /credits/consume (caller-driven spend)

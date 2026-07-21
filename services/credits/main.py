@@ -33,7 +33,8 @@ async def lifespan(app: FastAPI):
         import consumer
         # Daemon thread: pika's BlockingConnection would otherwise block the
         # event loop, and daemon=True lets uvicorn shut down cleanly. run()
-        # fans out to one thread per queue (billing_events + usage_events).
+        # fans out to one thread per queue (billing_events + usage_events +
+        # account_events).
         threading.Thread(target=consumer.run, name="credits-consumer", daemon=True).start()
     yield
 

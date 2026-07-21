@@ -1,5 +1,6 @@
 """
-Credits service tests: invoice.paid grants credits, ai.generation_completed
+Credits service tests: account.created opens a new account on its free-tier
+starter grant (spec §4), invoice.paid grants credits, ai.generation_completed
 debits them (spec §10), the consumer is idempotent (event_id replay AND
 fresh-event_id/same-business-key replay), refund.issued claws back the
 matching grant exactly once, the marketplace transfer is atomic (both ledger
@@ -61,6 +62,20 @@ def _refund_issued(account_id: str, amount: int = 2900, stripe_refund_id: str | 
     }, f"evt_{uuid.uuid4().hex}"
 
 
+def _account_created(account_id: str, type_: str = "individual", plan_tier: str = "free",
+                     owner_user_id: str | None = None,
+                     event_id: str | None = None) -> tuple[dict, str]:
+    """(payload, event_id) shaped exactly like the User service emits it
+    (services/user/provisioning.py:account_created_event)."""
+    return {
+        "account_id": account_id,
+        "type": type_,
+        "name": "acme@example.com",
+        "plan_tier": plan_tier,
+        "owner_user_id": owner_user_id or _uid(),
+    }, event_id or f"evt_{uuid.uuid4().hex}"
+
+
 def _generation_completed(account_id: str, total_tokens: int = 2500, job_id: str | None = None,
                           event_id: str | None = None, status: str = "completed",
                           user_id: str | None = None) -> tuple[dict, str]:
@@ -95,6 +110,143 @@ def _entries(db, account_id: str) -> list[LedgerEntry]:
 def _grant(client, account_id: str, plan: str = "pro") -> None:
     payload, event_id = _invoice_paid(account_id, plan=plan)
     consumer.handle_event("invoice.paid", payload, event_id)
+
+
+# --------------------------------------------------------------------------
+# Consumer: account.created -> free-tier starter grant (spec §4)
+# --------------------------------------------------------------------------
+
+def test_account_created_grants_starter_credits(client, db_session, published_events):
+    """A brand-new account opens on the configured free-tier balance instead
+    of 0 — one starter_grant row, distinct from a purchase."""
+    account_id, owner_id = _uid(), _uid()
+    payload, event_id = _account_created(account_id, owner_user_id=owner_id)
+    consumer.handle_event("account.created", payload, event_id)
+
+    assert _balance(client, account_id) == ledger.STARTER_GRANT
+
+    entries = _entries(db_session, account_id)
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry.entry_type == "starter_grant"       # NOT purchase_grant
+    assert entry.amount == ledger.STARTER_GRANT
+    # No money changed hands, so nothing links this row to Stripe.
+    assert entry.stripe_ref is None and entry.money_amount_cents is None
+    assert entry.created_by_user_id == owner_id      # audit attribution (§6)
+    assert "starter grant" in entry.reason
+    # processed_events recorded the event_id (spec §7)
+    assert db_session.get(ProcessedEvent, event_id) is not None
+
+    assert [rk for rk, _ in published_events] == ["credits.credited"]
+    emitted = published_events[0][1]
+    assert emitted["entry_type"] == "starter_grant"
+    assert emitted["amount"] == emitted["balance"] == ledger.STARTER_GRANT
+
+
+def test_starter_grant_amount_is_configurable(client, db_session, monkeypatch):
+    """CREDITS_STARTER_GRANT drives the amount; 0 switches the free tier off
+    without writing a zero row (the ledger's 'never zero' invariant)."""
+    monkeypatch.setattr(ledger, "STARTER_GRANT", 250)
+    generous = _uid()
+    consumer.handle_event("account.created", *_account_created(generous))
+    assert _balance(client, generous) == 250
+
+    monkeypatch.setattr(ledger, "STARTER_GRANT", 0)
+    disabled = _uid()
+    consumer.handle_event("account.created", *_account_created(disabled))
+    assert _balance(client, disabled) == 0
+    assert _entries(db_session, disabled) == []
+
+
+def test_starter_grant_idempotent_on_event_redelivery(client, db_session, published_events):
+    """Broker redelivery of the SAME event -> granted ONCE (processed_events)."""
+    account_id = _uid()
+    payload, event_id = _account_created(account_id)
+    consumer.handle_event("account.created", payload, event_id)
+    consumer.handle_event("account.created", payload, event_id)  # redelivery
+
+    assert _balance(client, account_id) == ledger.STARTER_GRANT
+    assert len(_entries(db_session, account_id)) == 1
+    assert [rk for rk, _ in published_events] == ["credits.credited"]  # announced once
+
+
+def test_starter_grant_idempotent_on_fresh_event_id_same_account(client, db_session):
+    """The User service re-emits account.created under a NEW event_id (so
+    processed_events cannot help) -> the account_id business-key guard still
+    prevents a second welcome balance. Unlike the other handlers there is no
+    invoice or job id to dedupe on: the account IS the business key."""
+    account_id = _uid()
+    payload, event_id = _account_created(account_id)
+    consumer.handle_event("account.created", payload, event_id)
+    consumer.handle_event("account.created", payload, f"evt_{uuid.uuid4().hex}")
+    # ...and again with a differently-shaped payload for the same account.
+    consumer.handle_event("account.created", *_account_created(account_id, type_="team"))
+
+    assert _balance(client, account_id) == ledger.STARTER_GRANT
+    assert len(_entries(db_session, account_id)) == 1
+
+
+def test_account_created_without_account_id_writes_nothing(client, db_session):
+    """Dropped rather than dead-lettered forever — no retry can supply the id
+    we scope and dedupe by."""
+    payload, event_id = _account_created(_uid())
+    del payload["account_id"]
+    consumer.handle_event("account.created", payload, event_id)
+    assert db_session.scalars(select(LedgerEntry)).all() == []
+
+
+def test_generation_debit_nets_against_the_starter_grant(client, db_session, published_events,
+                                                         monkeypatch):
+    """The Definition of Done's balance flow for a free account: signup grants
+    credits, the first AI generation debits them, and the balance is the sum
+    of the two rows — never negative on the very first generation, which is
+    the whole point of the grant."""
+    account_id = _uid()
+    # Pinned rather than read from config so the arithmetic below is explicit
+    # and does not move when the deployment retunes CREDITS_STARTER_GRANT.
+    monkeypatch.setattr(ledger, "STARTER_GRANT", 500)
+
+    consumer.handle_event("account.created", *_account_created(account_id))
+    consumer.handle_event("ai.generation_completed",
+                          *_generation_completed(account_id, total_tokens=2500))
+    cost = ledger.credits_for_tokens(2500)  # ceil(2500/1000) = 3
+
+    entries = _entries(db_session, account_id)
+    assert [e.entry_type for e in entries] == ["starter_grant", "generation_debit"]
+    assert [e.amount for e in entries] == [500, -cost]
+    assert _balance(client, account_id) == 497 == sum(e.amount for e in entries)
+
+    # The grant is what keeps this generation out of debt: no overdraft alert,
+    # where without it the balance would have gone to -3 (see
+    # test_insufficient_balance_records_the_debt_and_alerts).
+    assert [p for rk, p in published_events if rk == "credits.low_balance"] == []
+
+
+def test_starter_grant_survives_a_refund_clawback(client, db_session):
+    """Free credits are not refundable value: refund.issued reverses
+    purchase_grant rows only, so a refunded invoice can never eat the welcome
+    balance. This is the concrete reason starter_grant is its own type."""
+    account_id = _uid()
+    consumer.handle_event("account.created", *_account_created(account_id))
+    _grant(client, account_id, plan="pro")                       # +1000, refundable
+    consumer.handle_event("refund.issued", *_refund_issued(account_id))
+
+    entries = _entries(db_session, account_id)
+    assert [e.entry_type for e in entries] == ["starter_grant", "purchase_grant", "refund_clawback"]
+    assert _balance(client, account_id) == ledger.STARTER_GRANT
+
+
+def test_starter_grant_reads_distinctly_in_the_history_view(client):
+    """Transaction history must not present a gift as a purchase."""
+    account_id = _uid()
+    consumer.handle_event("account.created", *_account_created(account_id))
+    _grant(client, account_id, plan="pro")
+
+    entries = client.get("/credits/history", headers=_auth(account_id)).json()["entries"]
+    by_type = {e["entry_type"]: e for e in entries}
+    assert set(by_type) == {"starter_grant", "purchase_grant"}
+    assert by_type["starter_grant"]["stripe_ref"] is None
+    assert by_type["purchase_grant"]["stripe_ref"] is not None
 
 
 # --------------------------------------------------------------------------

@@ -24,6 +24,22 @@ PLAN_CREDITS: dict[str, int] = {
 
 LOW_BALANCE_THRESHOLD = int(config.env("CREDITS_LOW_BALANCE_THRESHOLD", "100"))
 
+# One-time free-tier grant on account.created (spec §4: the Free plan's
+# starter credit grant). Deliberately NOT in PLAN_CREDITS: that dict is keyed
+# by the plan on an invoice, and a free account never produces one — the
+# starter grant is triggered by the account existing, not by a payment.
+#
+# Without it a brand-new account starts at 0 and its very first generation
+# debit drives the balance negative (consumer.py records the debt rather than
+# refusing it), so the Definition of Done's "see balance update" would open on
+# an overdrawn account. Set to 0 to switch the free tier off entirely.
+#
+# The default sits exactly ON LOW_BALANCE_THRESHOLD above, so a free account's
+# first generation trips one credits.low_balance alert — defensible for a
+# 100-credit tier (they really are nearly out), but it is the knob to turn if
+# that reads as noise.
+STARTER_GRANT = int(config.env("CREDITS_STARTER_GRANT", "100"))
+
 # --- AI generation pricing (spec §10: "deducts credits correctly") ---------
 #
 # THE FORMULA:  credits = ceil(total_tokens / 1000) * CREDITS_PER_1K_TOKENS
