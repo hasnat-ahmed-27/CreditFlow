@@ -88,6 +88,10 @@ services:
       JWT_PUBLIC_KEY_PATH: /keys/jwt_public.pem
       JWT_PRIVATE_KEY_PATH: /keys/jwt_private.pem   # auth only — other services get just the public key
       AUTH_EXPOSE_DEV_TOKENS: "1"   # DEV ONLY: echoes verification/reset tokens in responses until the Notification service exists
+      USER_URL: http://user:8000    # resolves the real account_id/role claims before minting a token
+      # Platform SuperAdmins (spec §8/13) — comma-separated emails, reconciled
+      # into users.is_superadmin on startup. Empty = no SuperAdmin exists.
+      SUPERADMIN_EMAILS: ${SUPERADMIN_EMAILS:-}
     ports: ["8001:8000"]
     volumes:
       - ./keys:/keys:ro
@@ -166,7 +170,8 @@ services:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-creditflow}:${POSTGRES_PASSWORD:-creditflow}@postgres:5432/${POSTGRES_DB:-creditflow}
       RABBITMQ_URL: amqp://${RABBITMQ_USER:-creditflow}:${RABBITMQ_PASS:-creditflow}@rabbitmq:5672/
       JWT_PUBLIC_KEY_PATH: /keys/jwt_public.pem   # public key only — this service verifies, never mints
-      CREDITS_CONSUMER_ENABLED: "1"   # billing_events consumer runs in-process (thread)
+      CREDITS_CONSUMER_ENABLED: "1"   # billing_events + usage_events consumers run in-process (one thread per queue)
+      CREDITS_PER_1K_TOKENS: "1"      # AI generation price: ceil(total_tokens / 1000) credits (see ledger.py)
     ports: ["8004:8000"]
     volumes:
       - ./keys:/keys:ro
