@@ -1,7 +1,8 @@
 """
 CreditFlow Credits/Marketplace service — owns the credit ledger: purchase
-grants (from Billing's invoice.paid), consumption, refund claw-backs, and
-peer-to-peer buy/sell of credits between accounts.
+grants (from Billing's invoice.paid), AI generation debits (from the AI
+service's ai.generation_completed), refund claw-backs, and peer-to-peer
+buy/sell of credits between accounts.
 
 One sentence of design: the balance is never stored, only DERIVED — every
 change is an immutable credits_ledger row and the balance is their sum
@@ -31,7 +32,8 @@ async def lifespan(app: FastAPI):
     if CONSUMER_ENABLED:
         import consumer
         # Daemon thread: pika's BlockingConnection would otherwise block the
-        # event loop, and daemon=True lets uvicorn shut down cleanly.
+        # event loop, and daemon=True lets uvicorn shut down cleanly. run()
+        # fans out to one thread per queue (billing_events + usage_events).
         threading.Thread(target=consumer.run, name="credits-consumer", daemon=True).start()
     yield
 

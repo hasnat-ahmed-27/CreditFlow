@@ -182,6 +182,10 @@ def test_happy_path_persists_job_and_history(client, db_session):
 
 
 def test_generation_completed_event_matches_usage_contract(client, published_events):
+    """The one event three services key off: Usage meters it, Content drafts
+    from it, and Credits DEBITS the account for it (spec §10). job_id is the
+    business dedup key all three guard on, and total_tokens is what Credits
+    prices — so this payload is a cross-service contract, not just our output."""
     account_id = _uid()
     user_id = _uid()
     body = _generate(client, account_id, user_id=user_id)

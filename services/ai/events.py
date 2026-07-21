@@ -10,14 +10,19 @@ service's consumer.py) and ai.generation_failed (error reason).
 
 Pre-declared durable queues (same contract as the other services): the shared
 Publisher sends with mandatory=True, so every routing key needs at least one
-bound queue or the publish bounces as unroutable.
-  - `content.usage_events` — the future Content service (service 8) consumes
-    ai.generation_completed to create drafts; declaring its queue now means
-    every completion queues up for it from day one.
+bound queue or the publish bounces as unroutable. Declaring a consumer's
+queue HERE also means its events accumulate durably from day one, so a
+consumer that is down (or not yet deployed) misses nothing.
+  - `content.usage_events` — the Content service (service 8) consumes
+    ai.generation_completed to create drafts.
+  - `credits.usage_events` — the Credits service (service 5) consumes the
+    same key to debit the account for the tokens spent (spec §10). This one
+    is the money path: if Credits is down, the completion must WAIT in its
+    queue, not vanish.
   - `notifications.usage_events` — already declared by the Usage service for
     usage.threshold_reached; re-declaring is idempotent and ADDS the
     ai.generation_failed binding, so failure alerts land in the queue the
-    future Notification service will already be reading.
+    Notification service is already reading.
 (ai.generation_completed is routable from day one because Usage's own
 consumer queue binds it at Usage startup.)
 
@@ -36,6 +41,7 @@ EXCHANGE = "usage_events"
 
 PREDECLARED_QUEUES: dict[str, list[str]] = {
     "content.usage_events": ["ai.generation_completed"],
+    "credits.usage_events": ["ai.generation_completed"],
     "notifications.usage_events": ["ai.generation_failed"],
 }
 

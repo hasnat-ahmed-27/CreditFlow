@@ -1,10 +1,11 @@
 """
-Credits service tests: invoice.paid grants credits, the consumer is
-idempotent (event_id replay AND fresh-event_id/same-invoice replay),
-refund.issued claws back the matching grant exactly once, the marketplace
-transfer is atomic (both ledger rows or neither), the balance is always
-derived from the ledger, over-balance debits/transfers are rejected, and
-credits.credited / credits.debited / credits.low_balance are emitted.
+Credits service tests: invoice.paid grants credits, ai.generation_completed
+debits them (spec §10), the consumer is idempotent (event_id replay AND
+fresh-event_id/same-business-key replay), refund.issued claws back the
+matching grant exactly once, the marketplace transfer is atomic (both ledger
+rows or neither), the balance is always derived from the ledger,
+over-balance debits/transfers are rejected, and credits.credited /
+credits.debited / credits.low_balance are emitted.
 
 No infra: SQLite via conftest, consumer.handle_event called directly (the
 exact function the broker would call), publisher stubbed.
@@ -57,6 +58,25 @@ def _refund_issued(account_id: str, amount: int = 2900, stripe_refund_id: str | 
         "currency": "usd",
         "reason": "requested_by_customer",
     }, f"evt_{uuid.uuid4().hex}"
+
+
+def _generation_completed(account_id: str, total_tokens: int = 2500, job_id: str | None = None,
+                          event_id: str | None = None, status: str = "completed",
+                          user_id: str | None = None) -> tuple[dict, str]:
+    """(payload, event_id) shaped exactly like the AI worker emits it
+    (services/ai/worker.py)."""
+    return {
+        "account_id": account_id,
+        "user_id": user_id or _uid(),
+        "job_id": job_id or _uid(),
+        "model": "openai/gpt-4o-mini",
+        "input_tokens": total_tokens // 5,
+        "output_tokens": total_tokens - total_tokens // 5,
+        "total_tokens": total_tokens,
+        "cost_usd": 0.00012,
+        "status": status,
+        "usage_estimated": status == "cancelled",
+    }, event_id or f"evt_{uuid.uuid4().hex}"
 
 
 def _balance(client, account_id: str) -> int:
@@ -127,6 +147,169 @@ def test_unknown_plan_grants_nothing(client, db_session):
     consumer.handle_event("invoice.paid", payload, event_id)
     assert _balance(client, account_id) == 0
     assert _entries(db_session, account_id) == []
+
+
+# --------------------------------------------------------------------------
+# Consumer: ai.generation_completed -> credit debit (spec §10)
+# --------------------------------------------------------------------------
+
+def test_generation_debits_the_ledger(client, db_session, published_events):
+    account_id, user_id = _uid(), _uid()
+    _grant(client, account_id, plan="pro")  # +1000
+    published_events.clear()
+
+    payload, event_id = _generation_completed(account_id, total_tokens=2500, user_id=user_id)
+    consumer.handle_event("ai.generation_completed", payload, event_id)
+
+    # ceil(2500 / 1000) * 1 = 3 credits
+    cost = ledger.credits_for_tokens(2500)
+    assert cost == 3
+    assert _balance(client, account_id) == 1000 - cost
+
+    entry = _entries(db_session, account_id)[-1]
+    assert entry.entry_type == "generation_debit"
+    assert entry.amount == -cost
+    assert entry.job_id == payload["job_id"]          # the business key
+    assert entry.created_by_user_id == user_id        # audit attribution (§6)
+    assert "2500 tokens" in entry.reason
+    assert db_session.get(ProcessedEvent, event_id) is not None
+
+    assert [rk for rk, _ in published_events] == ["credits.debited"]
+    emitted = published_events[0][1]
+    assert emitted["amount"] == cost
+    assert emitted["balance"] == 1000 - cost
+    assert emitted["job_id"] == payload["job_id"]
+    assert emitted["entry_type"] == "generation_debit"
+
+
+def test_generation_debit_never_mutates_a_balance_in_place(client, db_session):
+    """Spec §8 Service 5: the ledger is append-only. Three generations leave
+    three rows and a balance that is exactly their sum."""
+    account_id = _uid()
+    _grant(client, account_id, plan="pro")  # +1000
+    for tokens in (1000, 4200, 500):
+        consumer.handle_event("ai.generation_completed", *_generation_completed(account_id, tokens))
+
+    entries = _entries(db_session, account_id)
+    assert [e.amount for e in entries] == [1000, -1, -5, -1]
+    assert _balance(client, account_id) == sum(e.amount for e in entries) == 993
+
+
+def test_generation_debit_idempotent_on_event_redelivery(client, db_session, published_events):
+    """Broker redelivery of the SAME event -> debited ONCE (processed_events)."""
+    account_id = _uid()
+    _grant(client, account_id, plan="pro")
+    payload, event_id = _generation_completed(account_id, total_tokens=3000)
+
+    consumer.handle_event("ai.generation_completed", payload, event_id)
+    consumer.handle_event("ai.generation_completed", payload, event_id)  # redelivery
+
+    assert _balance(client, account_id) == 1000 - 3
+    assert len([e for e in _entries(db_session, account_id)
+                if e.entry_type == "generation_debit"]) == 1
+    assert [rk for rk, _ in published_events].count("credits.debited") == 1
+
+
+def test_generation_debit_idempotent_on_fresh_event_id_same_job(client, db_session):
+    """The AI service re-emits the SAME job under a NEW event_id (so
+    processed_events cannot help) -> the job_id business-key guard still
+    prevents the double-debit."""
+    account_id = _uid()
+    _grant(client, account_id, plan="pro")
+    payload, event_id = _generation_completed(account_id, total_tokens=3000)
+
+    consumer.handle_event("ai.generation_completed", payload, event_id)
+    consumer.handle_event("ai.generation_completed", payload, f"evt_{uuid.uuid4().hex}")
+
+    assert _balance(client, account_id) == 1000 - 3
+    assert len([e for e in _entries(db_session, account_id)
+                if e.entry_type == "generation_debit"]) == 1
+
+
+def test_insufficient_balance_records_the_debt_and_alerts(client, db_session, published_events):
+    """The tokens were already streamed and already paid for upstream, so the
+    debit lands even though it overdraws — hiding it would let the account
+    keep generating for free. credits.low_balance carries `insufficient`."""
+    account_id = _uid()
+    consumer.handle_event("ai.generation_completed",
+                          *_generation_completed(account_id, total_tokens=5000))
+
+    assert _balance(client, account_id) == -5
+    entry = _entries(db_session, account_id)[-1]
+    assert entry.entry_type == "generation_debit" and entry.amount == -5
+
+    low = [p for rk, p in published_events if rk == "credits.low_balance"]
+    assert len(low) == 1
+    assert low[0]["balance"] == -5
+    assert low[0]["insufficient"] is True
+
+
+def test_low_balance_alerts_on_the_threshold_crossing_too(client, published_events):
+    account_id = _uid()
+    _grant(client, account_id, plan="pro")           # 1000
+    client.post("/credits/consume", json={"amount": 899}, headers=_auth(account_id))  # -> 101
+    published_events.clear()
+
+    # 101 -> 99 crosses LOW_BALANCE_THRESHOLD without going negative.
+    consumer.handle_event("ai.generation_completed",
+                          *_generation_completed(account_id, total_tokens=1500))
+    low = [p for rk, p in published_events if rk == "credits.low_balance"]
+    assert len(low) == 1
+    assert low[0]["balance"] == 99 and low[0]["insufficient"] is False
+
+    # Still below, but not newly so and not in debt -> no repeat alert.
+    published_events.clear()
+    consumer.handle_event("ai.generation_completed",
+                          *_generation_completed(account_id, total_tokens=100))
+    assert [p for rk, p in published_events if rk == "credits.low_balance"] == []
+
+
+def test_cancelled_generation_is_still_charged(client, db_session):
+    """The AI worker emits generation_completed with status='cancelled' and
+    estimated counts because the provider billed the tokens it streamed."""
+    account_id = _uid()
+    _grant(client, account_id, plan="pro")
+    consumer.handle_event("ai.generation_completed",
+                          *_generation_completed(account_id, total_tokens=1200, status="cancelled"))
+    assert _balance(client, account_id) == 1000 - ledger.credits_for_tokens(1200) == 998
+
+
+def test_zero_token_and_malformed_generations_write_nothing(client, db_session):
+    """A generation with nothing to meter is not a sale, and the ledger's
+    'never zero' invariant holds. A payload missing the keys we scope and
+    dedupe by is dropped rather than dead-lettered forever."""
+    account_id = _uid()
+    _grant(client, account_id, plan="pro")
+
+    consumer.handle_event("ai.generation_completed",
+                          *_generation_completed(account_id, total_tokens=0))
+    payload, event_id = _generation_completed(account_id)
+    del payload["job_id"]
+    consumer.handle_event("ai.generation_completed", payload, event_id)
+
+    assert _balance(client, account_id) == 1000
+    assert [e.entry_type for e in _entries(db_session, account_id)] == ["purchase_grant"]
+
+
+def test_generation_debit_appears_in_the_history_view(client):
+    account_id = _uid()
+    _grant(client, account_id, plan="pro")
+    payload, event_id = _generation_completed(account_id, total_tokens=2000)
+    consumer.handle_event("ai.generation_completed", payload, event_id)
+
+    entries = client.get("/credits/history", headers=_auth(account_id)).json()["entries"]
+    assert entries[0]["entry_type"] == "generation_debit"
+    assert entries[0]["job_id"] == payload["job_id"]
+    assert entries[0]["amount"] == -2
+
+
+def test_credits_per_1k_tokens_formula():
+    """ceil(total_tokens / 1000) credits, minimum 1 for any metered usage."""
+    assert ledger.credits_for_tokens(0) == 0
+    assert ledger.credits_for_tokens(1) == 1        # never free
+    assert ledger.credits_for_tokens(1000) == 1
+    assert ledger.credits_for_tokens(1001) == 2     # rounds up
+    assert ledger.credits_for_tokens(10_000) == 10
 
 
 # --------------------------------------------------------------------------
