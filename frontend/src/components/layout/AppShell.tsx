@@ -10,7 +10,7 @@ import { Topbar } from "./Topbar";
  * remembering where they were headed.
  */
 export function AppShell() {
-  const { claims, ready } = useAuth();
+  const { claims, ready, accountEpoch } = useAuth();
   const location = useLocation();
   const [drawerOpen, setDrawerOpen] = useState(false);
 
@@ -47,7 +47,11 @@ export function AppShell() {
       <div className="flex min-w-0 flex-1 flex-col">
         <Topbar onToggleSidebar={() => setDrawerOpen((v) => !v)} />
         <main className="min-h-0 flex-1 overflow-y-auto">
-          <div className="mx-auto w-full max-w-6xl px-4 py-6 sm:px-6 lg:px-8">
+          {/* Keying on the account epoch remounts every routed screen when the
+              user switches accounts, so all account-scoped data is refetched
+              under the new JWT — including on pages whose queries don't
+              happen to depend on account_id. */}
+          <div key={accountEpoch} className="mx-auto w-full max-w-6xl px-4 py-6 sm:px-6 lg:px-8">
             <Outlet />
           </div>
         </main>

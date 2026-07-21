@@ -19,7 +19,9 @@ class LoginRequest(BaseModel):
 
 
 class RefreshRequest(BaseModel):
-    refresh_token: str
+    # Optional: browsers send nothing and are authenticated by the httpOnly
+    # refresh cookie instead (cookies.resolve_refresh_token).
+    refresh_token: str | None = None
 
 
 class LogoutRequest(BaseModel):

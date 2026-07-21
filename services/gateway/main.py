@@ -162,17 +162,39 @@ async def request_id_and_log(request: Request, call_next):
 
 
 # CORS added last = outermost, so preflights short-circuit before anything
-# else and even 429/401/403 carry CORS headers. Same posture as the services
-# (allow-all by default), narrowed to the frontend origin via env.
+# else and even 429/401/403 carry CORS headers.
+#
+# allow_credentials is now ON because the refresh token travels as an httpOnly
+# cookie (auth/cookies.py) and the frontend is a different ORIGIN from the
+# gateway in dev (:5173 vs :8080) — without it the browser would neither send
+# that cookie nor expose the Set-Cookie response.
+#
+# Credentialed CORS forbids the literal `Access-Control-Allow-Origin: *`, so
+# the wildcard is expressed as an echo-any-origin regex instead: Starlette then
+# reflects the caller's exact Origin, which is what the browser requires. That
+# is deliberately permissive and meant for dev — GATEWAY_CORS_ORIGINS should
+# name the real frontend origins in any deployment, and the log line below
+# says so out loud. The credential itself is not left leaning on CORS: the
+# refresh cookie is SameSite=strict and the refresh route wants a
+# double-submit CSRF header, both of which hold regardless of this setting.
 _cors_origins = [
     o.strip() for o in os.getenv("GATEWAY_CORS_ORIGINS", "*").split(",") if o.strip()
 ]
+if "*" in _cors_origins:
+    logger.warning(
+        "GATEWAY_CORS_ORIGINS is '*' — every origin is allowed to make credentialed "
+        "requests. Set it to the frontend origin(s) outside local development."
+    )
+    _cors_kwargs = {"allow_origin_regex": ".*"}
+else:
+    _cors_kwargs = {"allow_origins": _cors_origins}
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_cors_origins,
-    allow_credentials=False,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    **_cors_kwargs,
 )
 
 

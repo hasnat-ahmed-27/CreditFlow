@@ -190,12 +190,23 @@ async def forward(request: Request) -> Response:
             status_code=502,
         )
 
+    # Set-Cookie is the one header that may legitimately repeat, and a dict —
+    # or httpx's own comma-joining .items() — would collapse the repeats into
+    # a single malformed header. Auth sends TWO on every mint (the httpOnly
+    # refresh cookie and the readable CSRF cookie), so they are pulled out
+    # here and re-attached individually below.
     response_headers = {
-        k: v for k, v in upstream.headers.items() if k.lower() not in _RESPONSE_DROP
+        k: v
+        for k, v in upstream.headers.items()
+        if k.lower() not in _RESPONSE_DROP and k.lower() != "set-cookie"
     }
-    return StreamingResponse(
+    response = StreamingResponse(
         upstream.aiter_raw(),                       # raw bytes, chunk-by-chunk, no decode
         status_code=upstream.status_code,
         headers=response_headers,
         background=BackgroundTask(upstream.aclose),  # release the connection after the last chunk
     )
+    for key, value in upstream.headers.multi_items():
+        if key.lower() == "set-cookie":
+            response.raw_headers.append((b"set-cookie", value.encode("latin-1")))
+    return response
