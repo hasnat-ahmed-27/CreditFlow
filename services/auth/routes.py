@@ -312,8 +312,11 @@ def switch_account(
         raise HTTPException(status_code=403, detail="Not a member of this account")
 
     payload, _, _ = _issue_token_pair(db, user, membership["account_id"], membership["role"])
-    store.revoke_session(claims["jti"])  # the previous scope stops working now
     db.commit()
+    # Only after the commit — same rule the consumers publish under. Revoking
+    # first and then failing to commit would strand the caller with a dead old
+    # session and a refresh token that was never persisted.
+    store.revoke_session(claims["jti"])  # the previous scope stops working now
     return payload
 
 
