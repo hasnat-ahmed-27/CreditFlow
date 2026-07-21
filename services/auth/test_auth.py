@@ -20,6 +20,7 @@ from sqlalchemy import select
 from creditflow_common import jwt_utils
 
 import conftest
+import database
 import store
 import superadmin
 import user_client
@@ -481,6 +482,57 @@ def test_refresh_falls_back_to_the_stored_role_when_user_is_down(client, account
     r = client.post("/auth/refresh", json={"refresh_token": tokens["refresh_token"]})
     assert r.status_code == 200, r.text
     assert jwt_utils.verify_token(r.json()["access_token"])["role"] == "owner"
+
+
+def test_added_columns_top_up_pre_existing_tables(tmp_path):
+    """The failure mode the rest of this suite structurally cannot see.
+
+    Every other test starts empty, so create_all builds `users` and
+    `refresh_tokens` complete. A REAL deployment has them already, and
+    create_all never ALTERs a table it can see — so is_superadmin and role
+    would silently not exist and every login would fail. Rebuild the old
+    table shapes, with a row in each, and prove startup heals them.
+
+    Both new columns are NOT NULL, so this also pins the thing that makes
+    that safe: the DEFAULT backfills the rows that came before.
+    """
+    from sqlalchemy import create_engine, inspect, text
+
+    eng = create_engine(f"sqlite:///{tmp_path / 'old.db'}")
+    with eng.begin() as conn:
+        conn.execute(text("""
+            CREATE TABLE users (
+                id VARCHAR(36) PRIMARY KEY,
+                email VARCHAR(255) NOT NULL,
+                is_verified BOOLEAN NOT NULL DEFAULT FALSE
+            )
+        """))
+        conn.execute(text("""
+            CREATE TABLE refresh_tokens (
+                jti VARCHAR(36) PRIMARY KEY,
+                user_id VARCHAR(36) NOT NULL,
+                account_id VARCHAR(36) NOT NULL
+            )
+        """))
+        conn.execute(text("INSERT INTO users VALUES ('u1', 'old@test.dev', 1)"))
+        conn.execute(text("INSERT INTO refresh_tokens VALUES ('j1', 'u1', 'a1')"))
+
+    for table, columns in database.ADDED_COLUMNS.items():
+        database.add_missing_columns(eng, table, columns)
+
+    inspector = inspect(eng)
+    assert "is_superadmin" in {c["name"] for c in inspector.get_columns("users")}
+    assert "role" in {c["name"] for c in inspector.get_columns("refresh_tokens")}
+
+    # Pre-existing rows are backfilled with the safe default — an old user is
+    # NOT silently promoted, and an old session keeps a valid role.
+    with eng.begin() as conn:
+        assert conn.execute(text("SELECT is_superadmin FROM users")).scalar() == 0
+        assert conn.execute(text("SELECT role FROM refresh_tokens")).scalar() == "owner"
+
+    # Idempotent: a restart adds nothing.
+    assert all(database.add_missing_columns(eng, t, c) == []
+               for t, c in database.ADDED_COLUMNS.items())
 
 
 def test_login_rate_limited_per_email(client):

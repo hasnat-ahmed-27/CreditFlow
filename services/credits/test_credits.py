@@ -20,6 +20,7 @@ from creditflow_common import jwt_utils
 from creditflow_common.idempotency import ProcessedEvent
 
 import consumer
+import database
 import ledger
 from models import LedgerEntry, MarketplaceListing
 
@@ -301,6 +302,52 @@ def test_generation_debit_appears_in_the_history_view(client):
     assert entries[0]["entry_type"] == "generation_debit"
     assert entries[0]["job_id"] == payload["job_id"]
     assert entries[0]["amount"] == -2
+
+
+def test_job_id_column_is_added_to_a_pre_existing_ledger_table(tmp_path):
+    """The failure mode the rest of this suite structurally cannot see.
+
+    Every other test starts from an empty database, so create_all builds
+    credits_ledger complete. A REAL deployment has the table already, and
+    create_all never ALTERs one it can see — so job_id (and its index, which
+    the double-debit guard looks up on every generation) would silently not
+    exist, and every generation debit would fail. Rebuild the pre-job_id
+    table shape and prove startup heals it.
+    """
+    from sqlalchemy import create_engine, inspect, text
+
+    eng = create_engine(f"sqlite:///{tmp_path / 'old.db'}")
+    with eng.begin() as conn:
+        conn.execute(text("""
+            CREATE TABLE credits_ledger (
+                id VARCHAR(36) PRIMARY KEY,
+                account_id VARCHAR(36) NOT NULL,
+                amount INTEGER NOT NULL,
+                entry_type VARCHAR(32) NOT NULL
+            )
+        """))
+        conn.execute(text("INSERT INTO credits_ledger VALUES ('e1', 'a1', 1000, 'purchase_grant')"))
+
+    added = database.add_missing_columns(
+        eng, "credits_ledger", database.ADDED_COLUMNS["credits_ledger"],
+        indexes=database.ADDED_INDEXES["credits_ledger"],
+    )
+    assert added == ["job_id"]
+
+    inspector = inspect(eng)
+    assert "job_id" in {c["name"] for c in inspector.get_columns("credits_ledger")}
+    assert "ix_credits_ledger_job_id" in {i["name"] for i in inspector.get_indexes("credits_ledger")}
+
+    # The pre-existing row survived untouched, with NULL for the new column —
+    # it predates generation debits, which is exactly what NULL should mean.
+    with eng.begin() as conn:
+        assert conn.execute(text("SELECT amount, job_id FROM credits_ledger")).all() == [(1000, None)]
+
+    # Idempotent: a restart adds nothing and does not fail on the index.
+    assert database.add_missing_columns(
+        eng, "credits_ledger", database.ADDED_COLUMNS["credits_ledger"],
+        indexes=database.ADDED_INDEXES["credits_ledger"],
+    ) == []
 
 
 def test_credits_per_1k_tokens_formula():

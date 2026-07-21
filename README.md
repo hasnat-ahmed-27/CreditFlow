@@ -42,6 +42,7 @@ creditflow/
 - **Auth:** JWT **RS256** — Auth signs with the private key, every service verifies with the public key.
 - **Messaging:** RabbitMQ topic exchanges per domain (`billing_events`, `social_events`, `scraper_events`, `usage_events`), durable queues, publisher confirms, DLQ + bounded retry.
 - **Reliability:** transactional outbox (Billing), idempotent consumers via a `processed_events` table.
+- **Schema:** `Base.metadata.create_all` on startup, no Alembic (spec-sanctioned). Because that only ever creates *missing tables* — it never `ALTER`s one that already exists — each service also declares any column added since its tables first shipped in an `ADDED_COLUMNS` map, topped up idempotently at startup (`creditflow_common.db.add_missing_columns`). Deliberately additive only: no drop, retype, or rename. Needing more than that is the signal to adopt Alembic rather than extend the helper.
 - **CI:** each service has a path-filtered workflow (pytest for backend, build for frontend). Images are built and pushed to **GHCR**; the deploy compose pulls them.
 
 ## Identity, tenancy, and roles
