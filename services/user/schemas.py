@@ -29,3 +29,10 @@ class AcceptInviteRequest(BaseModel):
 
 class UpdateMemberRoleRequest(BaseModel):
     role: GrantableRole
+
+
+class EnsureIndividualAccountRequest(BaseModel):
+    """Auth's signup/login provisioning call (internal.py). `email` only names
+    the account for display — identity is the Auth-owned user_id."""
+    user_id: str = Field(min_length=1, max_length=36)
+    email: str | None = Field(default=None, max_length=255)
