@@ -31,9 +31,11 @@ from creditflow_common.idempotency import ProcessedEvent  # noqa: F401
 
 # amount > 0 rows (credits in) vs amount < 0 rows (credits out).
 ENTRY_TYPES = (
+    "starter_grant",        # account.created consumed -> free-tier credits in
     "purchase_grant",       # invoice.paid consumed -> plan credits in
     "refund_clawback",      # refund.issued consumed -> grant reversed
-    "usage_debit",          # POST /credits/consume (AI usage spend)
+    "usage_debit",          # POST /credits/consume (caller-driven spend)
+    "generation_debit",     # ai.generation_completed consumed -> AI spend
     "marketplace_debit",    # seller side of a marketplace purchase
     "marketplace_credit",   # buyer side of a marketplace purchase
 )
@@ -62,6 +64,12 @@ class LedgerEntry(Base):
     # grants, stripe_refund_id on claw-backs. If Billing re-emits the same
     # invoice under a FRESH event_id, this is what still catches it.
     stripe_ref: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True)
+    # The same business-key idea for AI spend: the generation job id on
+    # generation_debit rows. One debit per job, ever — this is what stops a
+    # re-emitted ai.generation_completed (fresh event_id, same job) charging
+    # twice. Deliberately its own column rather than overloading stripe_ref:
+    # these ids come from a different service and mean a different thing.
+    job_id: Mapped[str | None] = mapped_column(String(36), index=True, nullable=True)
     listing_id: Mapped[str | None] = mapped_column(String(36), index=True, nullable=True)
     # The other account in a marketplace transfer (buyer on the seller's row
     # and vice versa) — keeps each row self-explanatory for the history view.

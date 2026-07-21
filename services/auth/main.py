@@ -16,6 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 import database
 import routes
+import superadmin
 
 SERVICE_NAME = os.getenv("SERVICE_NAME", "auth")
 
@@ -23,6 +24,14 @@ SERVICE_NAME = os.getenv("SERVICE_NAME", "auth")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     database.init_db()  # create schema + tables on startup (spec-sanctioned simple path)
+    # Reconcile the platform SuperAdmin allow-list (SUPERADMIN_EMAILS) in both
+    # directions — see superadmin.py for why deployment config, not an
+    # endpoint, is what designates one.
+    db = database.SessionLocal()
+    try:
+        superadmin.sync(db)
+    finally:
+        db.close()
     yield
 
 

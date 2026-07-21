@@ -16,6 +16,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 import database
+import internal
 import routes
 
 SERVICE_NAME = os.getenv("SERVICE_NAME", "user")
@@ -45,6 +46,9 @@ app.add_middleware(
 )
 
 app.include_router(routes.router)
+# Service-to-service only: /internal/* is absent from the Gateway route table,
+# so it is unreachable from outside the compose network (see internal.py).
+app.include_router(internal.router)
 
 
 @app.get("/health")
