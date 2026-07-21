@@ -530,17 +530,25 @@ services:
       retries: 5
 
   # ---- API Gateway: the single public entry point (:8080). Routes each
-  # public path prefix to the owning service, forwards Authorization
-  # untouched (services verify RS256 themselves — no keys mounted here),
-  # applies CORS + per-IP rate limiting + X-Request-ID, and re-streams the
-  # AI service's SSE token stream chunk-by-chunk without buffering.
-  # Individual services keep their 80xx host ports for direct dev access.
+  # public path prefix to the owning service, VERIFIES the RS256 access token
+  # and enforces per-route roles (§6) — then forwards the original
+  # Authorization header untouched so services keep their own defence-in-depth
+  # verification. Redis-backed per-IP + per-account rate limiting, provider
+  # webhook ingress (verify signature -> Redis SETNX dedup -> publish
+  # normalized event -> relay Stripe to Billing), response aggregation, CORS,
+  # X-Request-ID, and the unbuffered SSE re-stream of the AI token stream.
+  # The public key is mounted read-only (verify only — it still cannot mint;
+  # only Auth holds the private key). Individual services keep their 80xx host
+  # ports for direct dev access.
   gateway:
     build:
-      context: .                          # repo root to match convention (gateway needs no libs/)
+      context: .                          # repo root so libs/ is in the build context
       dockerfile: services/gateway/Dockerfile
     environment:
       SERVICE_NAME: gateway
+      REDIS_URL: redis://redis:6379/0                 # all gateway state: rate-limit counters + webhook dedup keys
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-creditflow}:${RABBITMQ_PASS:-creditflow}@rabbitmq:5672/
+      JWT_PUBLIC_KEY_PATH: /keys/jwt_public.pem       # public key only — the gateway verifies, never mints
       AUTH_URL: http://auth:8000
       USER_URL: http://user:8000
       BILLING_URL: http://billing:8000
@@ -554,9 +562,21 @@ services:
       NOTIFICATION_URL: http://notification:8000
       ADMIN_URL: http://admin:8000
       GATEWAY_CORS_ORIGINS: ${GATEWAY_CORS_ORIGINS:-*}   # frontend origin(s), comma-separated
-      GATEWAY_RATE_LIMIT_PER_MINUTE: ${GATEWAY_RATE_LIMIT_PER_MINUTE:-120}
+      GATEWAY_RATE_LIMIT_PER_MINUTE: ${GATEWAY_RATE_LIMIT_PER_MINUTE:-120}            # per-IP
+      GATEWAY_ACCOUNT_RATE_LIMIT_PER_MINUTE: ${GATEWAY_ACCOUNT_RATE_LIMIT_PER_MINUTE:-600}  # per-account
+      # Webhook signature secrets (verify-before-act). Stripe reuses Billing's
+      # endpoint secret so the SAME signature verifies at the gateway and on
+      # the relayed request. LinkedIn falls back to the app client secret.
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+      LINKEDIN_CLIENT_SECRET: ${LINKEDIN_CLIENT_SECRET:-}
+      LINKEDIN_WEBHOOK_SECRET: ${LINKEDIN_WEBHOOK_SECRET:-}
+      OPENROUTER_WEBHOOK_SECRET: ${OPENROUTER_WEBHOOK_SECRET:-}
     ports: ["8080:8000"]                  # the one public port
+    volumes:
+      - ./keys:/keys:ro
     depends_on:
+      redis: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
       auth: { condition: service_healthy }
       user: { condition: service_healthy }
       billing: { condition: service_healthy }

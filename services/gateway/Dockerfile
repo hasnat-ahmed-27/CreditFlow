@@ -1,6 +1,7 @@
-# Gateway image. Built with the REPO ROOT as context to match every other
-# service's compose convention — though unlike them the gateway does NOT
-# install libs/ (no creditflow_common: it holds no DB, broker, or JWT logic).
+# Gateway image. Built with the REPO ROOT as context (like every other
+# service) so the shared libs/ folder is available: the gateway now installs
+# creditflow_common for RS256 verification, the RabbitMQ publisher, and the
+# Redis config.
 #
 #   build:
 #     context: .
@@ -11,9 +12,15 @@ FROM python:3.12-slim
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 WORKDIR /app
 
+# 1) Install the shared library (creditflow_common + its deps).
+COPY libs /tmp/libs
+RUN pip install --no-cache-dir /tmp/libs
+
+# 2) Install service-specific deps.
 COPY services/gateway/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
+# 3) Copy the service code.
 COPY services/gateway/ ./
 
 # Build-time smoke test: fail the build if the app can't import.
