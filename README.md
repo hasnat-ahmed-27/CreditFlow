@@ -91,6 +91,25 @@ service, not membership.
 The ledger is append-only (`credits_ledger`) — every change is a row, the
 balance is `SUM(amount)`, nothing is ever mutated in place.
 
+**Free-plan starter grant** (§4): a new account opens on
+`CREDITS_STARTER_GRANT` credits (default 100) rather than 0, granted by the
+Credits service consuming `account.created` off `account_events` — the same
+event-driven shape as every other ledger write, so signup can never fail on a
+Credits outage and a grant that can't be applied yet waits in
+`credits.account_events` (which the User service pre-declares for exactly that
+reason). Its own `starter_grant` entry type, deliberately not `purchase_grant`:
+the history view shouldn't present a gift as a purchase, no Stripe reference or
+money amount backs the row, and refund claw-backs — which only ever reverse
+`purchase_grant` rows — can't eat the welcome balance. Idempotent on
+`processed_events` plus a once-per-`account_id` business key, since
+`account.created` carries no invoice or job id to dedupe on. Without the grant
+a brand-new account's first generation drives the balance straight negative.
+
+Note the default sits exactly at `CREDITS_LOW_BALANCE_THRESHOLD` (also 100), so
+a free account's first generation trips one `credits.low_balance` alert. That's
+arguably the honest signal for a 100-credit free tier; raise the grant or lower
+the threshold if it reads as noise.
+
 **AI generation deducts credits** (§10) via the Credits service consuming
 `ai.generation_completed` off `usage_events`, not via the AI service calling a
 debit endpoint. The spec's contract for Service 7 is *Consumes: none*, and a
