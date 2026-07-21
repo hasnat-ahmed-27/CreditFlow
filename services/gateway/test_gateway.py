@@ -194,14 +194,47 @@ def test_cors_preflight_answered_by_gateway_not_proxied(client, upstream):
         },
     )
     assert r.status_code == 200
-    assert r.headers["access-control-allow-origin"] == "*"
+    # The caller's Origin is ECHOED, not answered with "*": the refresh cookie
+    # made these requests credentialed, and a credentialed CORS response with a
+    # literal wildcard is rejected by the browser.
+    assert r.headers["access-control-allow-origin"] == "http://localhost:5173"
+    assert r.headers["access-control-allow-credentials"] == "true"
     assert "GET" in r.headers["access-control-allow-methods"]
     assert upstream.requests == []  # preflight never reaches an upstream
 
 
 def test_cors_header_on_simple_request(client, upstream, auth):
     r = client.get("/credits/balance", headers={**auth, "Origin": "http://localhost:5173"})
-    assert r.headers["access-control-allow-origin"] == "*"
+    assert r.headers["access-control-allow-origin"] == "http://localhost:5173"
+    assert r.headers["access-control-allow-credentials"] == "true"
+
+
+def test_multiple_set_cookie_headers_survive_the_proxy(client, upstream, auth):
+    """Auth sets TWO cookies on every mint (httpOnly refresh + readable CSRF).
+    A dict of headers — or httpx's comma-joining .items() — would fuse them
+    into one header and the browser would drop the second cookie."""
+    upstream.respond(headers=[
+        ("content-type", "application/json"),
+        ("set-cookie", "cf_refresh=abc; Path=/auth; HttpOnly; SameSite=strict"),
+        ("set-cookie", "cf_csrf=xyz; Path=/; SameSite=strict"),
+    ], json={"ok": True})
+
+    r = client.post("/auth/refresh", json={})
+
+    cookies = [v for k, v in r.headers.multi_items() if k.lower() == "set-cookie"]
+    assert len(cookies) == 2
+    assert any(c.startswith("cf_refresh=abc") and "HttpOnly" in c for c in cookies)
+    assert any(c.startswith("cf_csrf=xyz") for c in cookies)
+
+
+def test_cookie_header_is_forwarded_upstream(client, upstream):
+    """The refresh cookie only works if the gateway passes it to Auth."""
+    client.cookies.set("cf_refresh", "the-token")
+    client.post("/auth/refresh", json={}, headers={"X-CSRF-Token": "t"})
+
+    forwarded = upstream.requests[-1]
+    assert "cf_refresh=the-token" in forwarded.headers["cookie"]
+    assert forwarded.headers["x-csrf-token"] == "t"
 
 
 # ---------------------------------------------------------------------------

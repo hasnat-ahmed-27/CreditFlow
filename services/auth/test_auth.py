@@ -20,6 +20,7 @@ from sqlalchemy import select
 from creditflow_common import jwt_utils
 
 import conftest
+import cookies
 import database
 import store
 import superadmin
@@ -546,3 +547,127 @@ def test_login_rate_limited_per_email(client):
     # Even the CORRECT password is blocked while the window is hot.
     r = client.post("/auth/login", json={"email": email, "password": "s3cretpass!"})
     assert r.status_code == 429
+
+
+# ---------------------------------------------------------------------------
+# httpOnly refresh cookie + CSRF (spec §4: access token in memory, refresh
+# token in an httpOnly cookie, silent refresh on expiry)
+# ---------------------------------------------------------------------------
+
+def _cookie_attrs(response, name: str) -> str:
+    """The raw Set-Cookie line for `name` — attributes are only inspectable
+    there, not through the parsed cookie jar."""
+    for key, value in response.headers.multi_items():
+        if key.lower() == "set-cookie" and value.startswith(f"{name}="):
+            return value
+    raise AssertionError(f"no Set-Cookie for {name!r} in {response.headers}")
+
+
+def test_login_sets_an_httponly_refresh_cookie_and_a_readable_csrf_cookie(client):
+    email = _unique_email()
+    _signup_and_verify(client, email)
+    r = client.post("/auth/login", json={"email": email, "password": "s3cretpass!"})
+    assert r.status_code == 200
+
+    refresh = _cookie_attrs(r, cookies.REFRESH_COOKIE)
+    assert "httponly" in refresh.lower()             # script can never read it
+    assert "samesite=strict" in refresh.lower()      # first CSRF defence
+    assert "path=/auth" in refresh.lower()           # not sent on ordinary API calls
+    assert r.cookies[cookies.REFRESH_COOKIE] == r.json()["refresh_token"]
+
+    # The CSRF partner cookie is deliberately readable and site-wide, so the
+    # frontend's JS can echo it back in a header.
+    csrf = _cookie_attrs(r, cookies.CSRF_COOKIE)
+    assert "httponly" not in csrf.lower()
+    assert "path=/" in csrf.lower()
+
+
+def test_refresh_works_from_the_cookie_alone_with_a_csrf_header(client):
+    """The browser's silent-refresh path: no body, no Authorization header —
+    just the cookie the browser attaches plus the double-submit token."""
+    email = _unique_email()
+    _signup_and_verify(client, email)
+    first = _login(client, email)
+
+    r = client.post("/auth/refresh", headers={"X-CSRF-Token": client.cookies[cookies.CSRF_COOKIE]})
+    assert r.status_code == 200, r.text
+    second = r.json()
+    assert second["access_token"] != first["access_token"]
+
+    # The cookie ROTATED with the token — otherwise the next call would
+    # present the token we just revoked and trip the reuse detector.
+    assert client.cookies[cookies.REFRESH_COOKIE] == second["refresh_token"]
+    assert client.cookies[cookies.REFRESH_COOKIE] != first["refresh_token"]
+
+    # Proof the rotation really took: refreshing again from the cookie works.
+    r = client.post("/auth/refresh", headers={"X-CSRF-Token": client.cookies[cookies.CSRF_COOKIE]})
+    assert r.status_code == 200, r.text
+
+
+def test_cookie_refresh_is_refused_without_a_matching_csrf_token(client):
+    """A cross-site page can make the browser SEND the cookie but cannot READ
+    it, so it cannot produce this header. Both halves must be present and equal."""
+    email = _unique_email()
+    _signup_and_verify(client, email)
+    _login(client, email)
+    good = client.cookies[cookies.CSRF_COOKIE]
+
+    assert client.post("/auth/refresh").status_code == 403                       # header absent
+    assert client.post("/auth/refresh", headers={"X-CSRF-Token": "wrong"}).status_code == 403
+
+    del client.cookies[cookies.CSRF_COOKIE]                                      # cookie absent
+    assert client.post("/auth/refresh", headers={"X-CSRF-Token": good}).status_code == 403
+
+
+def test_body_refresh_token_needs_no_csrf_header(client):
+    """Possession of the token in the body IS the proof — that request is not
+    using ambient authority, so the second factor would be pointless. This is
+    what keeps non-browser clients working."""
+    email = _unique_email()
+    _signup_and_verify(client, email)
+    tokens = _login(client, email)
+    del client.cookies[cookies.CSRF_COOKIE]
+
+    r = client.post("/auth/refresh", json={"refresh_token": tokens["refresh_token"]})
+    assert r.status_code == 200, r.text
+
+
+def test_refresh_without_any_credential_is_401_not_500(client):
+    r = client.post("/auth/refresh")
+    assert r.status_code == 401
+    assert "refresh token" in r.json()["detail"].lower()
+
+
+def test_switch_account_moves_the_cookie_to_the_new_scope(client, accounts):
+    """A reload after switching must restore the account the user moved TO."""
+    email = _unique_email()
+    _signup_and_verify(client, email)
+    tokens = _login(client, email)
+    user_id = jwt_utils.verify_token(tokens["access_token"])["sub"]
+    team_id = accounts["add_membership"](user_id, "member")
+
+    r = client.post("/auth/switch-account", json={"account_id": team_id},
+                    headers={"Authorization": f"Bearer {tokens['access_token']}"})
+    assert r.status_code == 200
+    assert client.cookies[cookies.REFRESH_COOKIE] == r.json()["refresh_token"]
+
+    # And that cookie alone now refreshes into the NEW account's scope.
+    r = client.post("/auth/refresh", headers={"X-CSRF-Token": client.cookies[cookies.CSRF_COOKIE]})
+    assert r.status_code == 200, r.text
+    assert jwt_utils.verify_token(r.json()["access_token"])["account_id"] == team_id
+
+
+def test_logout_clears_both_cookies_and_kills_the_refresh_side(client):
+    email = _unique_email()
+    _signup_and_verify(client, email)
+    tokens = _login(client, email)
+
+    # No refresh_token in the body — logout falls back to the cookie.
+    r = client.post("/auth/logout", headers={"Authorization": f"Bearer {tokens['access_token']}"})
+    assert r.status_code == 200
+    assert client.cookies.get(cookies.REFRESH_COOKIE) is None
+    assert client.cookies.get(cookies.CSRF_COOKIE) is None
+
+    # The cookie's token was revoked too, not merely forgotten by the browser.
+    r = client.post("/auth/refresh", json={"refresh_token": tokens["refresh_token"]})
+    assert r.status_code == 401

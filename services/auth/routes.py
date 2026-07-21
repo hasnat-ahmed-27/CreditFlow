@@ -18,18 +18,26 @@ so a demotion takes effect on the next rotation.
 
 A designated platform SuperAdmin (superadmin.py) gets `role: "superadmin"`
 instead of their account role — platform-level, not account-scoped.
+
+Every mint path ALSO writes the refresh token to an httpOnly cookie (spec §4:
+"refresh token in an httpOnly cookie"), while still returning it in the body.
+Both transports stay live on purpose: the browser uses the cookie and keeps
+the access token in memory only, while API/CLI clients keep passing tokens
+explicitly. cookies.py owns that transport and the CSRF rules that come with
+making a credential ambient.
 """
 from __future__ import annotations
 
 import logging
 from datetime import timedelta
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from creditflow_common import config, jwt_utils
 
+import cookies
 import database
 import events
 import schemas
@@ -197,7 +205,12 @@ def verify_email(body: schemas.VerifyEmailRequest, db: Session = Depends(databas
 # --------------------------------------------------------------------------
 
 @router.post("/login")
-def login(body: schemas.LoginRequest, request: Request, db: Session = Depends(database.get_db)) -> dict:
+def login(
+    body: schemas.LoginRequest,
+    request: Request,
+    response: Response,
+    db: Session = Depends(database.get_db),
+) -> dict:
     email = body.email.lower()
     ip = request.client.host if request.client else "unknown"
     # Per-email and per-IP sliding windows (IP gets more headroom: several
@@ -219,14 +232,31 @@ def login(body: schemas.LoginRequest, request: Request, db: Session = Depends(da
     account_id, role = _resolve_default_scope(user)
     payload, access_jti, _ = _issue_token_pair(db, user, account_id, role)
     db.commit()
+    cookies.issue(response, payload["refresh_token"])
     events.publish("user.logged_in", {"user_id": user.id, "email": email, "jti": access_jti})
     return payload
 
 
 @router.post("/refresh")
-def refresh(body: schemas.RefreshRequest, db: Session = Depends(database.get_db)) -> dict:
+def refresh(
+    request: Request,
+    response: Response,
+    body: schemas.RefreshRequest | None = None,
+    db: Session = Depends(database.get_db),
+) -> dict:
+    """Rotate a refresh token into a new pair.
+
+    The token comes from the JSON body OR — when the body omits it, which is
+    what the browser does — from the httpOnly cookie, in which case the
+    double-submit CSRF header is required (cookies.resolve_refresh_token).
+    This is the frontend's silent-renewal path: with the access token held in
+    memory only, a page reload has nothing but this cookie to restore a
+    session from.
+    """
+    refresh_token = cookies.resolve_refresh_token(request, body.refresh_token if body else None)
+
     try:
-        claims = jwt_utils.verify_token(body.refresh_token)
+        claims = jwt_utils.verify_token(refresh_token)
     except jwt_utils.TokenError as exc:
         raise HTTPException(status_code=401, detail=str(exc))
     if claims.get("type") != "refresh":
@@ -272,12 +302,16 @@ def refresh(body: schemas.RefreshRequest, db: Session = Depends(database.get_db)
     payload, _, new_refresh_jti = _issue_token_pair(db, user, row.account_id, role)
     row.replaced_by_jti = new_refresh_jti
     db.commit()
+    # Rotation must reach the cookie too, or the browser would keep presenting
+    # the token we just revoked and trip the reuse detector on its next call.
+    cookies.issue(response, payload["refresh_token"])
     return payload
 
 
 @router.post("/switch-account")
 def switch_account(
     body: schemas.SwitchAccountRequest,
+    response: Response,
     claims: dict = Depends(current_claims),
     db: Session = Depends(database.get_db),
 ) -> dict:
@@ -313,6 +347,9 @@ def switch_account(
 
     payload, _, _ = _issue_token_pair(db, user, membership["account_id"], membership["role"])
     db.commit()
+    # The cookie follows the switch: a reload must restore the account the
+    # user actually moved to, not the one they left.
+    cookies.issue(response, payload["refresh_token"])
     # Only after the commit — same rule the consumers publish under. Revoking
     # first and then failing to commit would strand the caller with a dead old
     # session and a refresh token that was never persisted.
@@ -322,6 +359,8 @@ def switch_account(
 
 @router.post("/logout")
 def logout(
+    request: Request,
+    response: Response,
     body: schemas.LogoutRequest | None = None,
     claims: dict = Depends(current_claims),
     db: Session = Depends(database.get_db),
@@ -329,15 +368,25 @@ def logout(
     # Deleting the jti from Redis invalidates the access token platform-wide,
     # immediately — every service checks Redis, not just the signature.
     store.revoke_session(claims["jti"])
-    if body is not None and body.refresh_token:
+
+    # Revoke the refresh side too, from the body or the cookie. No CSRF check
+    # here: this route already demands a Bearer access token, which a
+    # cross-site page cannot attach, so the request is not ambient to begin
+    # with. A forced logout is also not an attack worth defending against.
+    refresh_token = (body.refresh_token if body else None) or cookies.read_refresh(request)
+    if refresh_token:
         try:
-            refresh_claims = jwt_utils.verify_token(body.refresh_token)
+            refresh_claims = jwt_utils.verify_token(refresh_token)
             row = db.get(RefreshToken, refresh_claims.get("jti", ""))
             if row is not None and row.user_id == claims["sub"] and row.revoked_at is None:
                 row.revoked_at = utcnow()
                 db.commit()
         except jwt_utils.TokenError:
             pass  # already unusable — nothing to revoke
+
+    # Unconditional: the browser must not keep a cookie that outlives the
+    # session it belonged to, even if the token was already dead.
+    cookies.clear(response)
     return {"message": "Logged out"}
 
 
