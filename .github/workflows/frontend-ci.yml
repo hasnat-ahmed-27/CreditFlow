@@ -16,8 +16,14 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
-      - name: Install + build
+      - name: Install
         working-directory: frontend
-        run: |
-          npm ci
-          npm run build
+        run: npm ci
+      # §9 requires CI to pass "lint, unit tests, Docker build". ESLint runs
+      # before the build so a lint slip fails fast and is attributed clearly.
+      - name: Lint
+        working-directory: frontend
+        run: npm run lint
+      - name: Build
+        working-directory: frontend
+        run: npm run build

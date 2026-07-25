@@ -28,7 +28,7 @@ export function openGenerationStream(jobId: string, handlers: StreamHandlers): (
         headers: { Authorization: `Bearer ${session.access ?? ""}` },
         signal: controller.signal,
       });
-    } catch (err) {
+    } catch {
       if (!controller.signal.aborted) {
         handlers.onError(new Error("Cannot reach the generation stream"));
       }
