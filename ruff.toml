@@ -1,0 +1,24 @@
+# Ruff configuration for all CreditFlow Python (services/ + libs/).
+# Committed so `ruff check` behaves identically locally and in CI — no reliance
+# on any machine-global or discovered config.
+#
+# Ruleset is deliberately high-signal and non-pedantic: Ruff's curated default
+# groups only. Whitespace/line-length cosmetics (E1/E2/E5, W) are intentionally
+# left out — they are the formatter's job, not a gate that should ever fail CI.
+target-version = "py311"
+line-length = 100
+
+# Generated / vendored trees that should never be linted.
+extend-exclude = ["libs/build", "libs/creditflow_common.egg-info", "**/__pycache__"]
+
+[lint]
+# E4  — import conventions (e.g. shadowing, unconventional aliases)
+# E7  — statement-level bugs (== None, bare 'except:', lambda assignment, ...)
+# E9  — syntax / IO errors that stop the file parsing at all
+# F   — pyflakes: unused imports, undefined names, unused variables (real bugs)
+select = ["E4", "E7", "E9", "F"]
+
+# E402 — module-level import not at top of file. The service test bootstraps
+# (conftest.py) deliberately set env vars and sys.path BEFORE importing the app
+# modules that read them at import time; that ordering is the whole point.
+ignore = ["E402"]

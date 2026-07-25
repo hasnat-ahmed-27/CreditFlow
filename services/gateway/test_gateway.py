@@ -27,11 +27,9 @@ import httpx
 import pytest
 from starlette.requests import Request
 
-import events
 import main
 import proxy
 import ratelimit
-import security
 import signatures
 import webhooks
 from conftest import (

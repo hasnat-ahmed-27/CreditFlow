@@ -616,6 +616,19 @@ services:
     depends_on:
       gateway: { condition: service_healthy }
     networks: [creditflow]
+    healthcheck:
+      # Health status is defined HERE (compose) so it's deterministic and
+      # overrides whatever the base image ships. The probe runs INSIDE the
+      # container, where nginx listens on :80 — never the host-published :3000,
+      # which isn't bound in the container's own network namespace. Probing a
+      # host port or an unserved path is the classic way a frontend reads
+      # "unhealthy" while it serves fine on http://localhost:3000. wget is the
+      # busybox applet shipped in nginx:alpine (curl is not).
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:80/ || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
 
 networks:
   creditflow:

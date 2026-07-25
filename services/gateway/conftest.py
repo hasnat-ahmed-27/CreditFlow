@@ -98,7 +98,7 @@ from creditflow_common import config  # noqa: E402
 import events  # noqa: E402
 import main  # noqa: E402
 import proxy  # noqa: E402
-import ratelimit  # noqa: E402
+import ratelimit  # noqa: E402, F401 — loaded under the test env for import-time config (see docstring)
 import store  # noqa: E402
 
 
