@@ -19,12 +19,20 @@ class LoginRequest(BaseModel):
 
 
 class RefreshRequest(BaseModel):
-    refresh_token: str
+    # Optional: browsers send nothing and are authenticated by the httpOnly
+    # refresh cookie instead (cookies.resolve_refresh_token).
+    refresh_token: str | None = None
 
 
 class LogoutRequest(BaseModel):
     # Optional: also revoke the refresh token, not just the access session.
     refresh_token: str | None = None
+
+
+class SwitchAccountRequest(BaseModel):
+    # Membership is verified against the User service — naming an account here
+    # is a request, not a claim.
+    account_id: str = Field(min_length=1, max_length=36)
 
 
 class PasswordResetRequest(BaseModel):

@@ -2,7 +2,8 @@
 User/Tenant service tests: individual-account auto-creation from
 user.registered (idempotency both by event_id and by user), create-team,
 invite -> accept -> member.joined, RBAC on role update / removal, the
-account switcher, and the default-account endpoint Auth will call at login.
+account switcher, the default-account endpoint, and the /internal API Auth
+calls to resolve the account_id/role claims it mints.
 """
 from __future__ import annotations
 
@@ -308,6 +309,84 @@ def test_account_switcher_lists_all_memberships_with_roles(client):
     assert accounts[individual]["type"] == "individual"
     assert accounts[team_id]["role"] == "member"
     assert accounts[team_id]["type"] == "team"
+
+
+# --------------------------------------------------------------------------
+# /internal — the seam Auth calls to resolve JWT claims (internal.py)
+# --------------------------------------------------------------------------
+
+def _ensure_individual(client, user_id: str, email: str | None = None):
+    return client.post("/internal/accounts/individual",
+                       json={"user_id": user_id, "email": email})
+
+
+def test_internal_ensure_creates_the_individual_account_with_the_user_as_owner(client, published_events):
+    uid = _uid()
+    r = _ensure_individual(client, uid, "dana@example.com")
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["created"] is True
+    assert body["role"] == "owner"
+    assert body["type"] == "individual"
+    assert body["name"] == "dana@example.com"
+    assert any(rk == "account.created" and p["account_id"] == body["account_id"]
+               and p["owner_user_id"] == uid for rk, p in published_events)
+
+
+def test_internal_ensure_is_idempotent(client, published_events):
+    """Auth calls this at signup AND again at login; and the user.registered
+    consumer provisions the same account. Whichever runs first wins — the
+    others return the same account and announce nothing."""
+    uid = _uid()
+    first = _ensure_individual(client, uid).json()
+    second = _ensure_individual(client, uid).json()
+    assert second["account_id"] == first["account_id"]
+    assert second["created"] is False
+
+    # And the event-driven path converges on the same row, not a second one.
+    _register(uid)
+    assert len(client.get("/users/me/accounts", headers=_auth(uid)).json()["accounts"]) == 1
+    assert len([1 for rk, _ in published_events if rk == "account.created"]) == 1
+
+
+def test_internal_ensure_after_the_consumer_already_provisioned(client):
+    """The reverse order: the event landed first, so Auth's call finds it."""
+    uid = _uid()
+    _register(uid, "eve@example.com")
+    body = _ensure_individual(client, uid, "eve@example.com").json()
+    assert body["created"] is False
+    assert body["account_id"] == client.get(f"/users/{uid}/default-account").json()["account_id"]
+
+
+def test_internal_membership_answers_the_role_for_that_account(client):
+    uid, team_owner = _uid(), _uid()
+    individual = _ensure_individual(client, uid).json()["account_id"]
+    team_id = _create_team(client, team_owner)
+    _invite_and_accept(client, team_id, team_owner, uid, role="admin")
+
+    r = client.get(f"/internal/users/{uid}/accounts/{individual}")
+    assert r.status_code == 200 and r.json()["role"] == "owner"
+    r = client.get(f"/internal/users/{uid}/accounts/{team_id}")
+    assert r.status_code == 200 and r.json()["role"] == "admin"
+
+
+def test_internal_membership_404s_for_non_members_and_unknown_accounts(client):
+    """404 for both, so Auth's 403 leaks nothing about which accounts exist."""
+    uid, other = _uid(), _uid()
+    foreign = _create_team(client, other)
+    assert client.get(f"/internal/users/{uid}/accounts/{foreign}").status_code == 404
+    assert client.get(f"/internal/users/{uid}/accounts/{_uid()}").status_code == 404
+
+
+def test_internal_membership_reflects_a_removal(client):
+    """This is what makes Auth's refresh path end a session after a removal."""
+    owner, member = _uid(), _uid()
+    team_id = _create_team(client, owner)
+    _invite_and_accept(client, team_id, owner, member)
+    assert client.get(f"/internal/users/{member}/accounts/{team_id}").status_code == 200
+
+    client.delete(f"/accounts/{team_id}/members/{member}", headers=_auth(owner))
+    assert client.get(f"/internal/users/{member}/accounts/{team_id}").status_code == 404
 
 
 def test_rename_account_publishes_account_updated(client, published_events):

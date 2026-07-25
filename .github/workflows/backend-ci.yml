@@ -5,12 +5,28 @@ name: backend-ci
 # as services are added — no need to edit this file per service.
 on:
   pull_request:
-    paths: ["services/**", "libs/**", ".github/workflows/backend-ci.yml"]
+    paths: ["services/**", "libs/**", "ruff.toml", ".github/workflows/backend-ci.yml"]
   push:
     branches: [dev, main]
-    paths: ["services/**", "libs/**"]
+    paths: ["services/**", "libs/**", "ruff.toml"]
 
 jobs:
+  # §9 requires CI to pass "lint, unit tests, Docker build". Lint is a separate,
+  # fast job so a style slip fails in ~10s without waiting on the test matrix,
+  # and a green tick clearly attributes to the right gate.
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Ruff
+        run: |
+          pip install ruff==0.16.0    # pin: identical rules in CI and locally
+          # Reads the committed ruff.toml at the repo root.
+          ruff check --output-format=github services libs
+
   test:
     runs-on: ubuntu-latest
     steps:

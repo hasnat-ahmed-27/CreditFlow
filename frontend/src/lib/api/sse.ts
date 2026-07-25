@@ -8,7 +8,7 @@
  *   event: token|done|cancelled|error
  *   data: {"seq": n, "type": "...", ...}
  */
-import { GATEWAY_URL, tokenStore } from "./client";
+import { GATEWAY_URL, session } from "./client";
 import type { StreamMessage } from "./types";
 
 export interface StreamHandlers {
@@ -25,10 +25,10 @@ export function openGenerationStream(jobId: string, handlers: StreamHandlers): (
     let response: Response;
     try {
       response = await fetch(`${GATEWAY_URL}/generations/${jobId}/stream`, {
-        headers: { Authorization: `Bearer ${tokenStore.access ?? ""}` },
+        headers: { Authorization: `Bearer ${session.access ?? ""}` },
         signal: controller.signal,
       });
-    } catch (err) {
+    } catch {
       if (!controller.signal.aborted) {
         handlers.onError(new Error("Cannot reach the generation stream"));
       }

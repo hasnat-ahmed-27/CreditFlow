@@ -88,6 +88,17 @@ services:
       JWT_PUBLIC_KEY_PATH: /keys/jwt_public.pem
       JWT_PRIVATE_KEY_PATH: /keys/jwt_private.pem   # auth only — other services get just the public key
       AUTH_EXPOSE_DEV_TOKENS: "1"   # DEV ONLY: echoes verification/reset tokens in responses until the Notification service exists
+      USER_URL: http://user:8000    # resolves the real account_id/role claims before minting a token
+      # Refresh-token cookie (spec §4). Secure=0 because local dev is plain
+      # http://localhost — set it to 1 anywhere with TLS, or the browser will
+      # simply drop the cookie. SameSite=strict is the first CSRF defence;
+      # note "site" ignores the port, so :5173 -> :8080 still counts as
+      # same-site and the cookie flows in dev.
+      AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-0}
+      AUTH_COOKIE_SAMESITE: ${AUTH_COOKIE_SAMESITE:-strict}
+      # Platform SuperAdmins (spec §8/13) — comma-separated emails, reconciled
+      # into users.is_superadmin on startup. Empty = no SuperAdmin exists.
+      SUPERADMIN_EMAILS: ${SUPERADMIN_EMAILS:-}
     ports: ["8001:8000"]
     volumes:
       - ./keys:/keys:ro
@@ -166,7 +177,9 @@ services:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-creditflow}:${POSTGRES_PASSWORD:-creditflow}@postgres:5432/${POSTGRES_DB:-creditflow}
       RABBITMQ_URL: amqp://${RABBITMQ_USER:-creditflow}:${RABBITMQ_PASS:-creditflow}@rabbitmq:5672/
       JWT_PUBLIC_KEY_PATH: /keys/jwt_public.pem   # public key only — this service verifies, never mints
-      CREDITS_CONSUMER_ENABLED: "1"   # billing_events consumer runs in-process (thread)
+      CREDITS_CONSUMER_ENABLED: "1"   # billing_events + usage_events + account_events consumers run in-process (one thread per queue)
+      CREDITS_PER_1K_TOKENS: "1"      # AI generation price: ceil(total_tokens / 1000) credits (see ledger.py)
+      CREDITS_STARTER_GRANT: ${CREDITS_STARTER_GRANT:-100}   # free-plan welcome balance, granted once per account on account.created
     ports: ["8004:8000"]
     volumes:
       - ./keys:/keys:ro
@@ -524,17 +537,25 @@ services:
       retries: 5
 
   # ---- API Gateway: the single public entry point (:8080). Routes each
-  # public path prefix to the owning service, forwards Authorization
-  # untouched (services verify RS256 themselves — no keys mounted here),
-  # applies CORS + per-IP rate limiting + X-Request-ID, and re-streams the
-  # AI service's SSE token stream chunk-by-chunk without buffering.
-  # Individual services keep their 80xx host ports for direct dev access.
+  # public path prefix to the owning service, VERIFIES the RS256 access token
+  # and enforces per-route roles (§6) — then forwards the original
+  # Authorization header untouched so services keep their own defence-in-depth
+  # verification. Redis-backed per-IP + per-account rate limiting, provider
+  # webhook ingress (verify signature -> Redis SETNX dedup -> publish
+  # normalized event -> relay Stripe to Billing), response aggregation, CORS,
+  # X-Request-ID, and the unbuffered SSE re-stream of the AI token stream.
+  # The public key is mounted read-only (verify only — it still cannot mint;
+  # only Auth holds the private key). Individual services keep their 80xx host
+  # ports for direct dev access.
   gateway:
     build:
-      context: .                          # repo root to match convention (gateway needs no libs/)
+      context: .                          # repo root so libs/ is in the build context
       dockerfile: services/gateway/Dockerfile
     environment:
       SERVICE_NAME: gateway
+      REDIS_URL: redis://redis:6379/0                 # all gateway state: rate-limit counters + webhook dedup keys
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-creditflow}:${RABBITMQ_PASS:-creditflow}@rabbitmq:5672/
+      JWT_PUBLIC_KEY_PATH: /keys/jwt_public.pem       # public key only — the gateway verifies, never mints
       AUTH_URL: http://auth:8000
       USER_URL: http://user:8000
       BILLING_URL: http://billing:8000
@@ -548,9 +569,21 @@ services:
       NOTIFICATION_URL: http://notification:8000
       ADMIN_URL: http://admin:8000
       GATEWAY_CORS_ORIGINS: ${GATEWAY_CORS_ORIGINS:-*}   # frontend origin(s), comma-separated
-      GATEWAY_RATE_LIMIT_PER_MINUTE: ${GATEWAY_RATE_LIMIT_PER_MINUTE:-120}
+      GATEWAY_RATE_LIMIT_PER_MINUTE: ${GATEWAY_RATE_LIMIT_PER_MINUTE:-120}            # per-IP
+      GATEWAY_ACCOUNT_RATE_LIMIT_PER_MINUTE: ${GATEWAY_ACCOUNT_RATE_LIMIT_PER_MINUTE:-600}  # per-account
+      # Webhook signature secrets (verify-before-act). Stripe reuses Billing's
+      # endpoint secret so the SAME signature verifies at the gateway and on
+      # the relayed request. LinkedIn falls back to the app client secret.
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+      LINKEDIN_CLIENT_SECRET: ${LINKEDIN_CLIENT_SECRET:-}
+      LINKEDIN_WEBHOOK_SECRET: ${LINKEDIN_WEBHOOK_SECRET:-}
+      OPENROUTER_WEBHOOK_SECRET: ${OPENROUTER_WEBHOOK_SECRET:-}
     ports: ["8080:8000"]                  # the one public port
+    volumes:
+      - ./keys:/keys:ro
     depends_on:
+      redis: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
       auth: { condition: service_healthy }
       user: { condition: service_healthy }
       billing: { condition: service_healthy }
@@ -583,6 +616,19 @@ services:
     depends_on:
       gateway: { condition: service_healthy }
     networks: [creditflow]
+    healthcheck:
+      # Health status is defined HERE (compose) so it's deterministic and
+      # overrides whatever the base image ships. The probe runs INSIDE the
+      # container, where nginx listens on :80 — never the host-published :3000,
+      # which isn't bound in the container's own network namespace. Probing a
+      # host port or an unserved path is the classic way a frontend reads
+      # "unhealthy" while it serves fine on http://localhost:3000. wget is the
+      # busybox applet shipped in nginx:alpine (curl is not).
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:80/ || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
 
 networks:
   creditflow:

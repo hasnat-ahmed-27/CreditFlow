@@ -9,6 +9,12 @@ Security choices:
     leak must not let an attacker verify accounts or reset passwords.
   - refresh_tokens keeps one row per issued refresh token so rotation can
     revoke the old one and detect reuse of an already-rotated token.
+  - `users.is_superadmin` is the PLATFORM role (spec §8 Service 13:
+    "platform-level, not account-scoped"). It is deliberately a flag on the
+    user, not a role in account_members: a SuperAdmin's authority does not
+    come from belonging to any account, so it cannot be granted by an account
+    owner. It is set only by the SUPERADMIN_EMAILS reconcile (superadmin.py),
+    never by any request.
 """
 from __future__ import annotations
 
@@ -42,6 +48,9 @@ class User(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True, nullable=False)
     is_verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # Platform SuperAdmin (see module docstring). Reconciled from
+    # SUPERADMIN_EMAILS at startup and applied at signup; no endpoint sets it.
+    is_superadmin: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     # Single-use email-verification token (hashed) + its expiry.
     verification_token_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     verification_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -64,6 +73,10 @@ class RefreshToken(Base):
     jti: Mapped[str] = mapped_column(String(36), primary_key=True)
     user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), index=True, nullable=False)
     account_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    # The role this token's scope was minted with. Rotation re-resolves the
+    # role from the User service, but falls back to this snapshot when that
+    # service is unreachable — a broker/network blip must not log everyone out.
+    role: Mapped[str] = mapped_column(String(16), nullable=False, default="owner")
     # The access-token jti issued alongside this refresh token, so rotation can
     # kill the old access session in Redis too.
     access_jti: Mapped[str | None] = mapped_column(String(36), nullable=True)

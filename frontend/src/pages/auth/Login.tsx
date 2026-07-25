@@ -5,6 +5,7 @@ import { Field, Input } from "../../components/ui/Input";
 import { useAuth } from "../../hooks/useAuth";
 import { useToast } from "../../hooks/useToast";
 import { ApiError } from "../../lib/api/client";
+import { hasOnboarded } from "../../lib/onboarding";
 import { AuthLayout } from "./AuthLayout";
 
 export default function Login() {
@@ -17,16 +18,23 @@ export default function Login() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const from = (location.state as { from?: string } | null)?.from ?? "/dashboard";
+  const requested = (location.state as { from?: string } | null)?.from ?? null;
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
     setBusy(true);
     setError(null);
     try {
-      await login(email, password);
+      const claims = await login(email, password);
       toast("success", "Welcome back");
-      navigate(from, { replace: true });
+      // A user who was bounced here from a deep link goes back to it. Everyone
+      // else lands on the dashboard — except on their first sign-in, where
+      // spec §4's Create-or-Join screen comes first (shown once per user).
+      if (requested) {
+        navigate(requested, { replace: true });
+      } else {
+        navigate(hasOnboarded(claims?.sub) ? "/dashboard" : "/onboarding", { replace: true });
+      }
     } catch (err) {
       const apiError = err instanceof ApiError ? err : null;
       if (apiError?.status === 403) {

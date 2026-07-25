@@ -12,7 +12,11 @@ Idempotency (spec §7 — consumers must survive at-least-once redelivery):
      broker redeliveries: the event row and the account rows commit in the
      SAME transaction, so either both exist or neither does.
   2. A user_id guard skips creation if the user already owns an individual
-     account — covers the producer re-emitting with a FRESH event_id.
+     account — covers the producer re-emitting with a FRESH event_id, AND
+     the case where Auth's synchronous POST /internal/accounts/individual
+     (internal.py) already provisioned the account at signup. Both paths run
+     the same provisioning.ensure_individual_account, so whichever arrives
+     first wins and the other is a no-op.
 
 The consumer runs as a daemon thread (see main.py); the loop in `run()`
 reconnects forever so a broker restart doesn't kill the service.
@@ -22,14 +26,12 @@ from __future__ import annotations
 import logging
 import time
 
-from sqlalchemy import select
-
 from creditflow_common import rabbitmq
 from creditflow_common.idempotency import already_processed
 
 import database
 import events
-from models import Account, AccountMember
+import provisioning
 
 logger = logging.getLogger("user.consumer")
 
@@ -63,41 +65,12 @@ def handle_event(routing_key: str, data: dict, event_id: str) -> None:
 
 def _create_individual_account(db, data: dict, published: list[tuple[str, dict]]) -> None:
     user_id = data.get("user_id")
-    email = data.get("email", "")
     if not user_id:
         logger.warning("user.registered without user_id — dropping: %s", data)
         return
-
-    existing = db.scalar(
-        select(Account)
-        .join(AccountMember, AccountMember.account_id == Account.id)
-        .where(
-            Account.type == "individual",
-            AccountMember.user_id == user_id,
-            AccountMember.role == "owner",
-        )
-    )
-    if existing is not None:
-        logger.info("user %s already has individual account %s — skipping", user_id, existing.id)
-        return
-
-    account = Account(
-        type="individual",
-        name=email or user_id,
-        plan_tier="free",
-        created_by_user_id=user_id,
-    )
-    db.add(account)
-    db.flush()  # assigns account.id for the membership row
-    db.add(AccountMember(account_id=account.id, user_id=user_id, role="owner"))
-    published.append(("account.created", {
-        "account_id": account.id,
-        "type": "individual",
-        "name": account.name,
-        "plan_tier": account.plan_tier,
-        "owner_user_id": user_id,
-    }))
-    logger.info("created individual account %s for user %s", account.id, user_id)
+    account, created = provisioning.ensure_individual_account(db, user_id, data.get("email", ""))
+    if created:
+        published.append(provisioning.account_created_event(account, user_id))
 
 
 def run() -> None:

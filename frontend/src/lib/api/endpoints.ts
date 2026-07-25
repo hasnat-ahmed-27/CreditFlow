@@ -5,9 +5,11 @@
  */
 import { api } from "./client";
 import type {
+  AccountProfile,
   AdminAccount,
   AdminSession,
   AdminUser,
+  AssignableRole,
   AuditEntry,
   CalendarResponse,
   CheckoutSession,
@@ -17,11 +19,15 @@ import type {
   CreditHistory,
   GenerationAccepted,
   GenerationJob,
+  InviteAccepted,
+  InviteCreated,
   Invoice,
   MarketplaceListing,
   MeResponse,
+  MembersResponse,
   ModelOption,
   MyAccountsResponse,
+  Role,
   NotificationLog,
   OAuthStart,
   Paginated,
@@ -46,8 +52,12 @@ export const authApi = {
     api.post<{ message: string }>("/auth/verify-email", { token }),
   login: (email: string, password: string) =>
     api.post<TokenPair>("/auth/login", { email, password }),
-  logout: (refresh_token: string | null) =>
-    api.post<{ message: string }>("/auth/logout", refresh_token ? { refresh_token } : undefined),
+  /** The refresh token rides the httpOnly cookie, so there is nothing to pass
+   *  — Auth reads it from the cookie and clears it in the response. */
+  logout: () => api.post<{ message: string }>("/auth/logout"),
+  /** Spec §4 account switcher — mints a JWT scoped to `account_id`. */
+  switchAccount: (account_id: string) =>
+    api.post<TokenPair>("/auth/switch-account", { account_id }),
   requestPasswordReset: (email: string) =>
     api.post<{ message: string; dev_reset_token?: string }>(
       "/auth/password-reset/request",
@@ -62,6 +72,27 @@ export const authApi = {
 
 export const userApi = {
   myAccounts: () => api.get<MyAccountsResponse>("/users/me/accounts"),
+  account: (accountId: string) => api.get<AccountProfile>(`/accounts/${accountId}`),
+  createTeam: (name: string) => api.post<AccountProfile>("/accounts", { name }),
+  renameAccount: (accountId: string, name: string) =>
+    api.patch<AccountProfile>(`/accounts/${accountId}`, { name }),
+
+  // Team membership. Note these are keyed by the account in the PATH, which
+  // the User service authorizes against account_members — not against the
+  // token's account_id (see services/user/routes.py).
+  members: (accountId: string) => api.get<MembersResponse>(`/accounts/${accountId}/members`),
+  invite: (accountId: string, email: string, role: AssignableRole) =>
+    api.post<InviteCreated>(`/accounts/${accountId}/invites`, { email, role }),
+  acceptInvite: (token: string) => api.post<InviteAccepted>("/invites/accept", { token }),
+  updateMemberRole: (accountId: string, userId: string, role: AssignableRole) =>
+    api.patch<{ account_id: string; user_id: string; role: Role }>(
+      `/accounts/${accountId}/members/${userId}`,
+      { role },
+    ),
+  removeMember: (accountId: string, userId: string) =>
+    api.delete<{ account_id: string; user_id: string; message: string }>(
+      `/accounts/${accountId}/members/${userId}`,
+    ),
 };
 
 // ---- credits -------------------------------------------------------------

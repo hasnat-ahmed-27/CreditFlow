@@ -3,10 +3,11 @@ import { useNavigate } from "react-router-dom";
 import { ChevronDown, Coins, LogOut, Menu, User } from "lucide-react";
 import { useApi } from "../../hooks/useApi";
 import { useAuth } from "../../hooks/useAuth";
-import { creditsApi, userApi } from "../../lib/api/endpoints";
+import { creditsApi } from "../../lib/api/endpoints";
 import { formatNumber, shortId } from "../../lib/format";
 import { Badge } from "../ui/Badge";
 import { Skeleton } from "../ui/Skeleton";
+import { AccountSwitcher } from "./AccountSwitcher";
 
 export function Topbar({ onToggleSidebar }: { onToggleSidebar: () => void }) {
   const { claims, role, logout } = useAuth();
@@ -14,12 +15,9 @@ export function Topbar({ onToggleSidebar }: { onToggleSidebar: () => void }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
 
+  // Re-keyed on the account so a switch refetches the balance for the new
+  // scope — the credit ledger is account-level (spec §6).
   const balance = useApi(() => creditsApi.balance(), [claims?.account_id]);
-  const accounts = useApi(() => userApi.myAccounts(), [claims?.sub]);
-
-  const account = accounts.data?.accounts.find(
-    (a) => a.account_id === claims?.account_id,
-  );
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -42,16 +40,7 @@ export function Topbar({ onToggleSidebar }: { onToggleSidebar: () => void }) {
         >
           <Menu size={18} />
         </button>
-        <div className="hidden items-center gap-2 sm:flex">
-          <span className="text-sm font-medium text-ink">
-            {account?.name ?? "Workspace"}
-          </span>
-          {account && (
-            <Badge tone="neutral" className="capitalize">
-              {account.plan_tier}
-            </Badge>
-          )}
-        </div>
+        <AccountSwitcher />
       </div>
 
       <div className="flex items-center gap-2.5">

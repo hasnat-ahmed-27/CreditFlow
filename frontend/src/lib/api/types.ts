@@ -45,6 +45,50 @@ export interface MyAccountsResponse {
   accounts: AccountSummary[];
 }
 
+/** Full profile from GET/POST/PATCH /accounts/{id} — adds the seat count the
+ *  dashboard header and team screen show. */
+export interface AccountProfile {
+  account_id: string;
+  type: "individual" | "team";
+  name: string | null;
+  plan_tier: string;
+  seat_count: number;
+  created_at: string;
+}
+
+/** Roles assignable to a member. "owner" is fixed at account creation and
+ *  cannot be granted (services/user/routes.py), so it is not in this union. */
+export type AssignableRole = "admin" | "member";
+
+export interface AccountMember {
+  user_id: string;
+  role: Role;
+  joined_at: string;
+}
+
+export interface MembersResponse {
+  account_id: string;
+  members: AccountMember[];
+}
+
+export interface InviteCreated {
+  invite_id: string;
+  email: string;
+  role: Role;
+  expires_at: string;
+  message: string;
+  /** Present only while USER_EXPOSE_DEV_TOKENS=1 (no mail delivery yet) — the
+   *  team screen surfaces it so an invite can be tested without email. */
+  dev_invite_token?: string;
+}
+
+export interface InviteAccepted {
+  account_id: string;
+  account_name: string | null;
+  role: Role;
+  message: string;
+}
+
 // ---- credits -------------------------------------------------------------
 
 export interface CreditBalance {

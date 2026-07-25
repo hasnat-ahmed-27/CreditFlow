@@ -57,6 +57,7 @@ def entry_view(e: LedgerEntry) -> dict:
         "amount": e.amount,
         "entry_type": e.entry_type,
         "stripe_ref": e.stripe_ref,
+        "job_id": e.job_id,
         "listing_id": e.listing_id,
         "counterparty_account_id": e.counterparty_account_id,
         "money_amount_cents": e.money_amount_cents,
@@ -124,8 +125,14 @@ def consume_credits(
     claims: dict = Depends(current_claims),
     db: Session = Depends(database.get_db),
 ) -> dict:
-    """Debit credits for usage (AI generation spend). Any member — usage is
-    the whole point of the shared account balance."""
+    """Debit credits for ad-hoc usage. Any member — usage is the whole point
+    of the shared account balance.
+
+    NOT the AI path: AI generations are debited by the consumer, off
+    `ai.generation_completed` (see consumer.py), so nothing needs to call
+    this after a generation — doing so would charge the account twice.
+    Unlike that path this one refuses to overdraw, because a caller-initiated
+    spend can still be told "no" before it happens."""
     account_id = claims["account_id"]
     before = ledger.balance(db, account_id)
     if body.amount > before:

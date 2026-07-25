@@ -1,8 +1,12 @@
-# The gateway is a pure reverse proxy — deliberately NO creditflow_common:
-# no DB, no broker, no Redis, and no JWT handling (services verify their own
-# RS256 tokens; the Authorization header passes through untouched).
+# Service-specific deps only. The shared `creditflow_common` package (and its
+# deps: pyjwt[crypto], pika, sqlalchemy, psycopg, redis) is installed from
+# /libs in the Dockerfile — the gateway now uses it for RS256 verification
+# (jwt_utils), Redis config, and the RabbitMQ publisher (rabbitmq).
 fastapi==0.111.0
 uvicorn[standard]==0.29.0
 python-dotenv==1.0.1
 # Streaming upstream client — the SSE passthrough needs chunk-by-chunk reads.
 httpx>=0.27
+# Test-only: in-memory Redis so pytest runs without infra (CI installs this
+# file). >=2.26 supports the RESP3 HELLO handshake modern redis-py sends.
+fakeredis>=2.26.0

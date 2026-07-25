@@ -39,16 +39,16 @@ from routes import current_claims, emit_balance_events, require_owner
 router = APIRouter(tags=["marketplace"])
 
 
-def _listing_view(l: MarketplaceListing) -> dict:
+def _listing_view(listing: MarketplaceListing) -> dict:
     return {
-        "listing_id": l.id,
-        "seller_account_id": l.seller_account_id,
-        "credits_amount": l.credits_amount,
-        "price_cents": l.price_cents,
-        "status": l.status,
-        "buyer_account_id": l.buyer_account_id,
-        "created_at": l.created_at.isoformat(),
-        "sold_at": l.sold_at.isoformat() if l.sold_at else None,
+        "listing_id": listing.id,
+        "seller_account_id": listing.seller_account_id,
+        "credits_amount": listing.credits_amount,
+        "price_cents": listing.price_cents,
+        "status": listing.status,
+        "buyer_account_id": listing.buyer_account_id,
+        "created_at": listing.created_at.isoformat(),
+        "sold_at": listing.sold_at.isoformat() if listing.sold_at else None,
     }
 
 
@@ -61,7 +61,7 @@ def browse_listings(claims: dict = Depends(current_claims), db: Session = Depend
         .where(MarketplaceListing.status == "open")
         .order_by(MarketplaceListing.created_at.desc())
     ).all()
-    return {"listings": [_listing_view(l) for l in rows]}
+    return {"listings": [_listing_view(listing) for listing in rows]}
 
 
 @router.post("/credits/marketplace/listings", status_code=201)
