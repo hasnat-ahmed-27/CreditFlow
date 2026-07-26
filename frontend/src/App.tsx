@@ -16,6 +16,7 @@ import Notifications from "./pages/Notifications";
 import Onboarding from "./pages/Onboarding";
 import Scraper from "./pages/Scraper";
 import Social from "./pages/Social";
+import BillingSuccess from "./pages/BillingSuccess";
 import Team from "./pages/Team";
 import ForgotPassword from "./pages/auth/ForgotPassword";
 import Login from "./pages/auth/Login";
@@ -89,6 +90,7 @@ export default function App() {
                   SuperAdmin — is refused there too. */}
               <Route element={<RequireRole allow={OWNER_ROLES} />}>
                 <Route path="/billing" element={<Billing />} />
+                <Route path="/billing/success" element={<BillingSuccess />} />
                 <Route path="/credits" element={<Credits />} />
               </Route>
 
