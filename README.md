@@ -1,5 +1,16 @@
 # CreditFlow — AI Platform
 
+> ### 🔗 Live demo: **http://13.60.163.115:3000**
+> Deployed on a single AWS EC2 instance via `docker compose` — the full 13-service stack, running 24/7.
+
+[![backend-ci](https://github.com/hasnat-ahmed-27/CreditFlow/actions/workflows/backend-ci.yml/badge.svg)](https://github.com/hasnat-ahmed-27/CreditFlow/actions/workflows/backend-ci.yml)
+[![frontend-ci](https://github.com/hasnat-ahmed-27/CreditFlow/actions/workflows/frontend-ci.yml/badge.svg)](https://github.com/hasnat-ahmed-27/CreditFlow/actions/workflows/frontend-ci.yml)
+![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.111-009688?logo=fastapi&logoColor=white)
+![React](https://img.shields.io/badge/React-Vite-61DAFB?logo=react&logoColor=black)
+![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)
+![RabbitMQ](https://img.shields.io/badge/RabbitMQ-events-FF6600?logo=rabbitmq&logoColor=white)
+
 Multi-tenant, credit-based SaaS for AI-assisted content generation and social
 publishing. **13 independently deployable backend microservices** behind a
 single API Gateway, plus a React frontend, communicating asynchronously over
@@ -11,13 +22,20 @@ Accounts (individual or team) buy credits, spend them on AI generations, and
 can list/buy/transfer credits with other accounts through an internal
 marketplace.
 
-> **Status / honesty note.** The full system runs locally via `docker compose`.
-> Everything below describes what is actually in the repo. Where a feature needs
-> a third-party key to be *proven live* (Stripe, OpenRouter, LinkedIn, Resend),
-> that is called out explicitly — the code path exists and is unit-tested, but a
-> key is required to exercise it end-to-end. AWS deployment is bonus/stretch
-> scope (spec §5) and is **not** implemented; see
-> [AWS free-tier constraints](#aws-free-tier-constraints--tradeoffs).
+> **Status.** The full system is **deployed live** on a single AWS EC2 instance
+> ([http://13.60.163.115:3000](http://13.60.163.115:3000)) via `docker compose`,
+> and runs identically on a local machine. **Every integration is proven
+> end-to-end, live:**
+> - **OpenRouter** — AI generation streaming token-by-token via SSE, with credit deduction
+> - **Stripe** (test mode) — hosted checkout → webhook → subscription active → credit grant → balance updates
+> - **LinkedIn** — OAuth connect + **image publishing to a real feed** (register-upload → asset URN → UGC post)
+> - **Resend** — transactional email (signup verification, password-reset OTP)
+>
+> Both mandatory bonuses (recurring schedules, LinkedIn image publishing) and the
+> AWS single-machine deployment bonus are done. A real event dead-lettering bug
+> was found and fixed during testing. Solo build; every change went through a
+> CI-gated PR into `dev`. See [dev-only affordances](#dev-only-affordances--known-gaps)
+> for the honest small print.
 
 ---
 
@@ -506,10 +524,10 @@ tests and left intact.
 
 ## AWS free-tier constraints & tradeoffs
 
-AWS deployment is **spec §5 bonus/stretch scope and is not implemented.** The
-supported run target is `docker compose` locally (or on a single VM). This
-section documents the intended free-tier shape and the honest tradeoffs, as
-required by the DoD.
+AWS deployment (spec §5 bonus) is **done** — the full stack runs on a single
+AWS EC2 instance via `docker compose up`, live at
+[http://13.60.163.115:3000](http://13.60.163.115:3000). This section documents
+the free-tier shape and the honest tradeoffs, as required by the DoD.
 
 **Intended shape (single-box):** one always-on EC2 `t2.micro`/`t3.micro` (the
 750 hrs/month free-tier instance) running the whole compose stack, with Postgres
